@@ -25,7 +25,8 @@ Open `http://localhost:5173`. The app runs out of the box with zero API keys usi
 
 - `GOOGLE_MAPS_API_KEY`: Enables Google Street View facade imagery on building pages.
 - `OPENROUTER_API_KEY`: Enables natural-language AI search, cluster takeaways, web-grounded building Field Notes, and Street View Vision audits.
-- `CACHE_DIR`: Optional directory for persistent stale-while-revalidate disk caching (defaults to `.cache/nyc-storefront`; set to `/data/cache` on Railway with a mounted volume).
+- `CACHE_DIR`: Optional directory for persistent stale-while-revalidate disk caching (defaults to `/tmp/nycstorefront-cache`; set to `/data/cache` on Railway with a mounted volume).
+- `STATS_SECRET`: Optional passcode that enables the private, cookie-free visitor analytics dashboard at `/stats` (persisted alongside `CACHE_DIR` in `/data/analytics`).
 
 ## Data Pipeline & Tests
 
