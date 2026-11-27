@@ -9,7 +9,7 @@
 </script>
 
 <svelte:head>
-	<title>About — NYC Storefront Vacancy</title>
+	<title>About | NYC Storefront Vacancy</title>
 </svelte:head>
 
 <div class="page-shell">
@@ -21,7 +21,7 @@
 				<span class="kicker">About</span>
 				<h1>Keeping New York’s ground floor alive</h1>
 				<p class="lead">
-					New York works best when ground-floor vacancy is super low — when corners are lit up,
+					New York works best when ground-floor vacancy is super low: when corners are lit up,
 					small businesses can take a chance on a block, and streets feel alive. I built this site
 					in the hope that seeing the city clearly, block by block, helps us learn what’s working,
 					spot what’s stuck, and make New York even better.
@@ -51,12 +51,12 @@
 						target="_blank"
 						rel="noopener noreferrer">post on NYC storefront vacancies</a
 					>, which pointed to the city’s public registry. The underlying data is genuinely great,
-					even though the official site is only okay for actually exploring street by street — so I
-					spent Thanksgiving Day with Gemini Neon putting together this companion.
+					even though the official site is only okay for exploring street by street, so I spent
+					Thanksgiving Day with Gemini Neon putting together this companion.
 				</p>
 
 				<p>
-					I’m grateful to Mark for keeping storefront health in the public conversation — and on a
+					I’m grateful to Mark for keeping storefront health in the public conversation. On a
 					personal note, his COVID-era posts were really valuable to me at a time when good
 					information was hard to come by. I appreciate his leadership then and now.
 				</p>
@@ -69,7 +69,7 @@
 					>), a New Yorker who cares a lot about seeing this city thrive and bring in new jobs. I’m
 					also the co-founder and treasurer of the
 					<strong>Wonderful West 15th Street Block Association</strong>, where you see up close
-					every day how much a single empty storefront — or one great new neighbor — shapes the feel
+					every day how much a single empty storefront, or one great new neighbor, shapes the feel
 					of a block.
 				</p>
 			</div>
@@ -78,13 +78,13 @@
 				<span class="kicker">Why Clusters Instead of Neighborhoods?</span>
 				<p>
 					Official city maps group storefronts by ZIP code or census neighborhood, which often blurs
-					together bustling avenues and struggling stretches — or splits a single shopping corridor
+					together bustling avenues and struggling stretches, or splits a single shopping corridor
 					right down the middle.
 				</p>
 				<p>
 					The {numFmt(meta.clusterCount)} clusters here take a cue from Supreme Court Justice Anthony
 					Kennedy, who argued in redistricting opinions like <em>Vieth v. Jubelirer</em> that modern
-					data and simple geometric rules — keeping regions compact and contiguous — can reveal real
+					data and simple geometric rules (keeping regions compact and contiguous) can reveal real
 					communities on the ground rather than arbitrary lines. Neighboring blocks with similar
 					vacancy rates are grouped from the street up into tight, street-aligned pockets so real
 					patterns stand out cleanly.
