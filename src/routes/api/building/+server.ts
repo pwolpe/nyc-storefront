@@ -44,6 +44,20 @@ const LANDUSE_LABELS: Record<string, string> = {
 	'11': 'Vacant Land'
 };
 
+/**
+ * MapPLUTO puts all R1 (2–10 unit condo) buildings into landuse '2' ("Multi-Family Walk-Up")
+ * even though NYC DOF class R1 doesn't specify stairs vs. elevator. Only label a building
+ * "Multi-Family Walk-Up" when its building class actually denotes a walk-up (C* or R2).
+ */
+function resolveLandUseLabel(landuse: string | undefined, bldgClass: string | undefined): string {
+	const base = LANDUSE_LABELS[landuse || ''] || 'Building';
+	const cls = (bldgClass || '').trim().toUpperCase();
+	if (base === 'Multi-Family Walk-Up' && cls && !cls.startsWith('C') && cls !== 'R2') {
+		return cls.startsWith('R') ? 'Residential Condo' : 'Multi-Family Residential';
+	}
+	return base;
+}
+
 function titleCase(s: string): string {
 	return s
 		.toLowerCase()
@@ -153,7 +167,11 @@ export const GET: RequestHandler = async ({ url, platform }) => {
 		if (cached.stale) {
 			dossierCache.revalidate(cacheKey, () => fetchFreshDossier(rawBbl, aliasBbls, apiKey));
 		}
-		return json(cached.data, {
+		const payload =
+			cached.data.landUseLabel === 'Multi-Family Walk-Up'
+				? { ...cached.data, landUseLabel: resolveLandUseLabel('2', cached.data.bldgClass) }
+				: cached.data;
+		return json(payload, {
 			headers: {
 				'Cache-Control': dev ? 'no-store' : 'public, max-age=3600, s-maxage=43200, stale-while-revalidate=86400'
 			}
@@ -797,7 +815,7 @@ async function fetchFreshDossier(
 		zipcode: pluto.zipcode || '',
 		zoning: pluto.zonedist1 || '',
 		bldgClass: pluto.bldgclass || '',
-		landUseLabel: LANDUSE_LABELS[pluto.landuse || ''] || 'Building',
+		landUseLabel: resolveLandUseLabel(pluto.landuse, pluto.bldgclass),
 		yearBuilt: parseNum(pluto.yearbuilt),
 		floors: parseNum(pluto.numfloors),
 		lotFrontFt: parseNum(pluto.lotfront),

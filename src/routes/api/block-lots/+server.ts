@@ -150,7 +150,15 @@ function landUseInfo(rawLanduse: string | number | undefined, bldgclass: string)
 	if (bc.startsWith('Q') || landuse === '9') return { kind: 'park', label: 'Park / Open Space' };
 	if (landuse === '8' || /^[MWNP]/.test(bc)) return { kind: 'civic', label: 'Civic / Institutional' };
 	if (landuse === '1') return { kind: 'residential', label: '1–2 Family Residential' };
-	if (landuse === '2') return { kind: 'residential', label: 'Multi-Family Walk-Up' };
+	if (landuse === '2') {
+		if (bc && !bc.startsWith('C') && bc !== 'R2') {
+			return {
+				kind: 'residential',
+				label: bc.startsWith('R') ? 'Residential Condo' : 'Multi-Family Residential'
+			};
+		}
+		return { kind: 'residential', label: 'Multi-Family Walk-Up' };
+	}
 	if (landuse === '3') return { kind: 'residential', label: 'Elevator Apartment' };
 	if (landuse === '4') return { kind: 'residential', label: 'Mixed Res / Comm' };
 	if (landuse === '5') return { kind: 'commercial', label: 'Commercial / Office' };

@@ -46,7 +46,7 @@ export function explainZoning(code: string | null | undefined): string {
 const EXACT_BLDG_CLASS: Record<string, string> = {
 	RM: 'Mixed-use condo',
 	R4: 'Elevator condo',
-	R1: 'Walk-up condo',
+	R1: 'Condo (2–10 units)',
 	R2: 'Walk-up condo',
 	R3: 'Low-rise condo',
 	R5: 'Commercial condo',
