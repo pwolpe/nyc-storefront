@@ -14,6 +14,13 @@
 		explainZoning,
 		formatMonthYear
 	} from '$lib/nycGlossary';
+	import {
+		buildingCache,
+		fieldNoteClientCache,
+		visionAuditClientCache,
+		warmBuilding,
+		xrayClientCache
+	} from '$lib/clientCache';
 	import TopBar from '$lib/components/TopBar.svelte';
 	import BuildingHeroVisual from '$lib/components/BuildingHeroVisual.svelte';
 	import ShareButton from '$lib/components/ShareButton.svelte';
@@ -66,6 +73,13 @@
 		}
 		if (xray?.bbl === d.bbl) return;
 
+		const cachedX = xrayClientCache.get(d.bbl);
+		if (cachedX) {
+			xray = cachedX;
+			xrayOpen = false;
+			return;
+		}
+
 		const controller = new AbortController();
 		xray = null;
 		xrayOpen = false;
@@ -74,6 +88,7 @@
 			.then((r) => (r.ok ? r.json() : null))
 			.then((res: LandlordXrayResponse | null) => {
 				if (!controller.signal.aborted && res?.bbl === d.bbl) {
+					xrayClientCache.set(d.bbl, res);
 					xray = res;
 				}
 			})
@@ -97,6 +112,13 @@
 			return;
 		}
 		if (visionAudit?.bbl === d.bbl) return;
+
+		const cachedV = visionAuditClientCache.get(d.bbl);
+		if (cachedV) {
+			visionAudit = cachedV;
+			visionLoading = false;
+			return;
+		}
 
 		const controller = new AbortController();
 		visionAudit = null;
@@ -131,6 +153,7 @@
 			.then((r) => (r.ok ? r.json() : null))
 			.then((res: StreetViewAuditResult | null) => {
 				if (!controller.signal.aborted && res?.configured && res.summary) {
+					visionAuditClientCache.set(d.bbl, res);
 					visionAudit = res;
 				}
 			})
@@ -234,6 +257,13 @@
 			return;
 		}
 
+		const cachedFn = fieldNoteClientCache.get(d.bbl);
+		if (cachedFn) {
+			aiFieldNote = cachedFn;
+			aiFieldLoading = false;
+			return;
+		}
+
 		const controller = new AbortController();
 		aiFieldNote = null;
 		aiFieldLoading = true;
@@ -261,13 +291,15 @@
 						return;
 					}
 					if (res?.summary) {
-						aiFieldNote = {
+						const note = {
 							bbl: d.bbl,
 							verdictTag: res.verdictTag,
 							summary: res.summary,
 							citations: res.citations || [],
 							webGrounded: Boolean(res.webGrounded)
 						};
+						fieldNoteClientCache.set(d.bbl, note);
+						aiFieldNote = note;
 					}
 				}
 			)
@@ -286,38 +318,59 @@
 		return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc)}`;
 	}
 
-	const prefetchedDoors = new Set<string>();
 	function prefetchDoor(targetBbl: string | undefined) {
-		if (!targetBbl || prefetchedDoors.has(targetBbl)) return;
-		prefetchedDoors.add(targetBbl);
-		fetch(`/api/building?bbl=${encodeURIComponent(targetBbl)}`, { priority: 'low' as RequestPriority }).catch(
-			() => {}
-		);
+		if (targetBbl) warmBuilding(targetBbl);
 	}
+
+	// Quietly pre-warm the two adjacent sidewalk doors so ← Prev / Next → clicks open at 0ms!
+	$effect(() => {
+		const p = prevBuilding?.bbl;
+		const n = nextBuilding?.bbl;
+		const timer = setTimeout(() => {
+			if (p) warmBuilding(p);
+			if (n) warmBuilding(n);
+		}, 600);
+		return () => clearTimeout(timer);
+	});
 
 	$effect(() => {
 		const targetBbl = bbl;
 		const controller = new AbortController();
-		loading = true;
 		loadError = '';
 		showAllRows = false;
 		hoveredYear = null;
 		pinnedYear = null;
 
-		fetch(`/api/building?bbl=${encodeURIComponent(targetBbl)}`, { signal: controller.signal })
-			.then((r) => {
+		const applyDossier = (json: BuildingDossier) => {
+			dossier = json;
+			if (json.tenants.length > 0) activeTab = 'tenants';
+			else if (json.dofHistory.length > 0) activeTab = 'dof';
+			else if (json.oathCases.length > 0) activeTab = 'oath';
+			else if (json.permits.length > 0) activeTab = 'permits';
+			else activeTab = 'c311';
+		};
+
+		const cached = buildingCache.get(targetBbl);
+		if (cached) {
+			applyDossier(cached);
+			loading = false;
+			return;
+		}
+
+		loading = true;
+		buildingCache
+			.getOrFetch(targetBbl, async () => {
+				const r = await fetch(`/api/building?bbl=${encodeURIComponent(targetBbl)}`, {
+					signal: controller.signal
+				});
 				if (!r.ok) throw new Error('Unable to load building dossier');
-				return r.json();
+				return (await r.json()) as BuildingDossier;
 			})
-			.then((json: BuildingDossier) => {
-				if (json.bbl === targetBbl) {
-					dossier = json;
-					// Default to Businesses & Licenses when present (chart above already shows yearly filings)
-					if (json.tenants.length > 0) activeTab = 'tenants';
-					else if (json.dofHistory.length > 0) activeTab = 'dof';
-					else if (json.oathCases.length > 0) activeTab = 'oath';
-					else if (json.permits.length > 0) activeTab = 'permits';
-					else activeTab = 'c311';
+			.then((json) => {
+				if (json && json.bbl === targetBbl && !controller.signal.aborted) {
+					applyDossier(json);
+				} else if (!json && !controller.signal.aborted) {
+					loadError = 'Unable to load building dossier';
 				}
 			})
 			.catch((e) => {

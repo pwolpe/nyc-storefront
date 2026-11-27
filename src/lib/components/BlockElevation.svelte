@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { warmBuilding } from '$lib/clientCache';
 	import type {
 		BlockLot,
 		BlockNavLinks,
@@ -318,20 +319,16 @@
 			.replace(/\bEast\b/i, 'E');
 	}
 
-	const prefetchedBbls = new Set<string>();
 	let prefetchTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function handleLotHover(lot: BlockLot) {
 		hoveredLotId = lot.id;
 		if (prefetchTimer) clearTimeout(prefetchTimer);
 		const cleanBbl = (lot.bbl || '').split('.')[0].trim();
-		if (!/^[1-5]\d{9}$/.test(cleanBbl) || prefetchedBbls.has(cleanBbl)) return;
+		if (!/^[1-5]\d{9}$/.test(cleanBbl)) return;
 		prefetchTimer = setTimeout(() => {
-			prefetchedBbls.add(cleanBbl);
-			fetch(`/api/building?bbl=${encodeURIComponent(cleanBbl)}`, { priority: 'low' as RequestPriority }).catch(
-				() => {}
-			);
-		}, 130);
+			warmBuilding(cleanBbl);
+		}, 110);
 	}
 
 	function handleLotLeave() {

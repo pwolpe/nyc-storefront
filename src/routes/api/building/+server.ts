@@ -2,6 +2,7 @@ import { json, error } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { dev } from '$app/environment';
 import { cleanDofActivity, dedupeDofRows, parseDofVacant, parseDofYear } from '$lib/dofDedupe';
+import { PersistentCache } from '$lib/server/cache';
 import type { RequestHandler } from './$types';
 import type {
 	BuildingDossier,
@@ -115,8 +116,12 @@ async function fetchObjectSafe<T>(url: string, timeoutMs = 5500): Promise<T | nu
 	}
 }
 
-const dossierCache = new Map<string, { at: number; data: BuildingDossier }>();
-const CACHE_TTL_MS = 1000 * 60 * 30;
+const dossierCache = new PersistentCache<BuildingDossier>(
+	'building-dossier-v5',
+	1000 * 60 * 60 * 24, // fresh 24h
+	2000,
+	1000 * 60 * 60 * 24 * 30 // SWR up to 30d
+);
 
 export const GET: RequestHandler = async ({ url, platform }) => {
 	const rawBbl = (url.searchParams.get('bbl') || '').split('.')[0].trim();
@@ -131,12 +136,31 @@ export const GET: RequestHandler = async ({ url, platform }) => {
 	).trim();
 
 	const cacheKey = `v5:${rawBbl}:${apiKey ? 'sv' : 'nosv'}`;
-	const cached = dossierCache.get(cacheKey);
-	if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+	const cached = dossierCache.getWithStatus(cacheKey);
+	if (cached) {
+		if (cached.stale) {
+			dossierCache.revalidate(cacheKey, () => fetchFreshDossier(rawBbl, apiKey));
+		}
 		return json(cached.data, {
-			headers: { 'Cache-Control': dev ? 'no-store' : 'public, max-age=3600, s-maxage=43200' }
+			headers: {
+				'Cache-Control': dev ? 'no-store' : 'public, max-age=3600, s-maxage=43200, stale-while-revalidate=86400'
+			}
 		});
 	}
+
+	const dossier = await fetchFreshDossier(rawBbl, apiKey);
+	if (dossier && (dossier.dofHistory.length > 0 || dossier.yearBuilt !== null)) {
+		dossierCache.set(cacheKey, dossier);
+	}
+
+	return json(dossier, {
+		headers: {
+			'Cache-Control': dev ? 'no-store' : 'public, max-age=3600, s-maxage=43200, stale-while-revalidate=86400'
+		}
+	});
+};
+
+async function fetchFreshDossier(rawBbl: string, apiKey: string): Promise<BuildingDossier> {
 
 	const boroCode = rawBbl[0];
 	const blockNum = parseInt(rawBbl.slice(1, 6), 10);
@@ -238,17 +262,17 @@ export const GET: RequestHandler = async ({ url, platform }) => {
 		oathHistRows,
 		parcelGeo
 	] = await Promise.all([
-		fetchJsonSafe<Record<string, string>>(plutoUrl, 7500),
-		fetchJsonSafe<Record<string, string>>(dofUrl, 7500),
-		fetchJsonSafe<Record<string, string>>(oathUrl, 7500),
-		fetchJsonSafe<Record<string, string>>(c311Url, 7500),
-		fetchJsonSafe<Record<string, string>>(dobNowUrl, 6500),
-		fetchJsonSafe<Record<string, string>>(dobLegacyUrl, 6500),
-		fetchJsonSafe<Record<string, string>>(dohmhUrl, 6000),
-		fetchJsonSafe<Record<string, string>>(dcwpUrl, 6000),
-		fetchJsonSafe<Record<string, string>>(openRestUrl, 5000),
-		fetchJsonSafe<Record<string, string>>(oathHistUrl, 6000),
-		fetchObjectSafe<ParcelGeo>(parcelUrl, 5000)
+		fetchJsonSafe<Record<string, string>>(plutoUrl, 4500),
+		fetchJsonSafe<Record<string, string>>(dofUrl, 4500),
+		fetchJsonSafe<Record<string, string>>(oathUrl, 3200),
+		fetchJsonSafe<Record<string, string>>(c311Url, 3200),
+		fetchJsonSafe<Record<string, string>>(dobNowUrl, 3200),
+		fetchJsonSafe<Record<string, string>>(dobLegacyUrl, 3200),
+		fetchJsonSafe<Record<string, string>>(dohmhUrl, 3500),
+		fetchJsonSafe<Record<string, string>>(dcwpUrl, 3500),
+		fetchJsonSafe<Record<string, string>>(openRestUrl, 2800),
+		fetchJsonSafe<Record<string, string>>(oathHistUrl, 3000),
+		fetchObjectSafe<ParcelGeo>(parcelUrl, 3500)
 	]);
 
 	const pluto = plutoRows[0] || {};
@@ -673,13 +697,5 @@ export const GET: RequestHandler = async ({ url, platform }) => {
 		permits
 	};
 
-	if (plutoRows.length > 0 || dofRows.length > 0) {
-		dossierCache.set(cacheKey, { at: Date.now(), data: dossier });
-	}
-
-	return json(dossier, {
-		headers: {
-			'Cache-Control': dev ? 'no-store' : 'public, max-age=3600, s-maxage=43200'
-		}
-	});
-};
+	return dossier;
+}

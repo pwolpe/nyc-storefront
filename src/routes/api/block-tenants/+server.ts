@@ -1,6 +1,8 @@
 import { json } from '@sveltejs/kit';
 import { dev } from '$app/environment';
 import { cleanDofActivity, dedupeDofRows, parseDofVacant, parseDofYear } from '$lib/dofDedupe';
+import { PersistentCache } from '$lib/server/cache';
+import { lookupPrebakedTenants } from '$lib/server/tenantsIndex';
 import type { RequestHandler } from './$types';
 import type { BlockTenantInfo, BlockTenantsResponse, TenantRecord } from '$lib/types';
 
@@ -36,8 +38,12 @@ async function fetchJsonWithTimeout<T>(url: string, ms = 6000): Promise<T | null
 	}
 }
 
-const tenantCache = new Map<string, { at: number; data: BlockTenantsResponse }>();
-const CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour
+const tenantCache = new PersistentCache<BlockTenantsResponse>(
+	'block-tenants-v2',
+	1000 * 60 * 60 * 24, // fresh 24h
+	2500,
+	1000 * 60 * 60 * 24 * 30 // SWR 30d
+);
 
 export const GET: RequestHandler = async ({ url }) => {
 	const rawBbls = (url.searchParams.get('bbls') || '')
@@ -57,13 +63,29 @@ export const GET: RequestHandler = async ({ url }) => {
 	}
 
 	const cacheKey = `${uniqueBbls.join(',')}|${uniqueVacant.join(',')}`;
-	const cached = tenantCache.get(cacheKey);
-	if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+	const cached = tenantCache.getWithStatus(cacheKey);
+	if (cached) {
+		if (cached.stale) {
+			tenantCache.revalidate(cacheKey, () => fetchBlockTenants(uniqueBbls));
+		}
 		return json(cached.data, {
-			headers: { 'Cache-Control': dev ? 'no-store' : 'public, max-age=3600, s-maxage=86400' }
+			headers: {
+				'Cache-Control': dev ? 'no-store' : 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400'
+			}
 		});
 	}
 
+	const payload = await fetchBlockTenants(uniqueBbls);
+	tenantCache.set(cacheKey, payload);
+
+	return json(payload, {
+		headers: {
+			'Cache-Control': dev ? 'no-store' : 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400'
+		}
+	});
+};
+
+async function fetchBlockTenants(uniqueBbls: string[]): Promise<BlockTenantsResponse> {
 	const bblIn = uniqueBbls.map((b) => `'${b}'`).join(',');
 
 	const dohmhUrl =
@@ -110,12 +132,13 @@ export const GET: RequestHandler = async ({ url }) => {
 	};
 
 	const [dohmhRows, dcwpRows, dofRows] = await Promise.all([
-		fetchJsonWithTimeout<DohmhRow[]>(dohmhUrl, 5500),
-		fetchJsonWithTimeout<DcwpRow[]>(dcwpUrl, 5500),
-		dofUrl ? fetchJsonWithTimeout<DofRow[]>(dofUrl, 5500) : Promise.resolve(null)
+		fetchJsonWithTimeout<DohmhRow[]>(dohmhUrl, 3800),
+		fetchJsonWithTimeout<DcwpRow[]>(dcwpUrl, 3800),
+		fetchJsonWithTimeout<DofRow[]>(dofUrl, 4500)
 	]);
 
-	const byBbl: Record<string, BlockTenantInfo> = {};
+	// Seed with pre-baked citywide tenants so even if Socrata times out we never drop a business name!
+	const byBbl: Record<string, BlockTenantInfo> = lookupPrebakedTenants(uniqueBbls);
 	const ensure = (bbl: string): BlockTenantInfo => {
 		if (!byBbl[bbl]) {
 			byBbl[bbl] = { tenants: [], vacantYears: 0, vacantSinceYear: null, priorActivity: null };
@@ -123,7 +146,7 @@ export const GET: RequestHandler = async ({ url }) => {
 		return byBbl[bbl];
 	};
 
-	// Track deduplicated tenant names per BBL
+	// Track deduplicated tenant names per BBL (starting from pre-baked entries)
 	const seenByBbl = new Map<string, Map<string, TenantRecord>>();
 	const addTenant = (bbl: string, rec: TenantRecord) => {
 		if (!rec.name) return;
@@ -136,7 +159,6 @@ export const GET: RequestHandler = async ({ url }) => {
 			m.set(key, rec);
 			return;
 		}
-		// Prefer active over recent/former, and newer date over older
 		const rank = { active: 3, recent: 2, former: 1 };
 		if (
 			rank[rec.status] > rank[existing.status] ||
@@ -145,6 +167,10 @@ export const GET: RequestHandler = async ({ url }) => {
 			m.set(key, rec);
 		}
 	};
+
+	for (const [bbl, info] of Object.entries(byBbl)) {
+		for (const t of info.tenants) addTenant(bbl, t);
+	}
 
 	// 1. DOHMH Restaurants / Cafes / Bars / Delis
 	if (Array.isArray(dohmhRows)) {
@@ -259,10 +285,5 @@ export const GET: RequestHandler = async ({ url }) => {
 	}
 
 	const availableYears = [...allYearsSet].filter((y) => y >= 2019 && y <= 2025).sort((a, b) => a - b);
-	const payload: BlockTenantsResponse = { byBbl, years: availableYears };
-	tenantCache.set(cacheKey, { at: Date.now(), data: payload });
-
-	return json(payload, {
-		headers: { 'Cache-Control': dev ? 'no-store' : 'public, max-age=3600, s-maxage=86400' }
-	});
-};
+	return { byBbl, years: availableYears };
+}

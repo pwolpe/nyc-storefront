@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { PageData } from './$types';
 	import { pct, ptsDiff, numFmt, rateTone, deltaPts, deltaTone, signedNum } from '$lib/format';
+	import { clusterBriefClientCache, warmBlock } from '$lib/clientCache';
 	import TopBar from '$lib/components/TopBar.svelte';
 	import ClusterGridSvg from '$lib/components/ClusterGridSvg.svelte';
 	import ClusterCohesion from '$lib/components/ClusterCohesion.svelte';
@@ -53,8 +54,25 @@
 			}));
 	});
 
+	// Predictively warm any hovered block segment in the SVG grid or block list
+	$effect(() => {
+		const sid = highlightedSegId;
+		const cid = cluster.id;
+		if (!sid) return;
+		const t = setTimeout(() => warmBlock(cid, sid), 120);
+		return () => clearTimeout(t);
+	});
+
 	$effect(() => {
 		const cid = cluster.id;
+		const hit = clusterBriefClientCache.get(cid);
+		if (hit) {
+			aiTakeaway = hit.summary;
+			aiTakeawayCites = hit.citations;
+			aiTakeawayId = cid;
+			aiTakeawayLoading = false;
+			return;
+		}
 		const controller = new AbortController();
 		if (aiTakeawayId !== cid) {
 			aiTakeaway = '';
@@ -120,6 +138,10 @@
 						aiTakeaway = res.summary;
 						aiTakeawayCites = res.citations || [];
 						aiTakeawayId = cid;
+						clusterBriefClientCache.set(cid, {
+							summary: res.summary,
+							citations: res.citations || []
+						});
 					}
 				}
 			)

@@ -1,5 +1,7 @@
 import { json, error } from '@sveltejs/kit';
 import { dev } from '$app/environment';
+import { PersistentCache } from '$lib/server/cache';
+import { lookupPrebakedTenants } from '$lib/server/tenantsIndex';
 import type { RequestHandler } from './$types';
 import type {
 	BlockLot,
@@ -895,38 +897,48 @@ function buildBlockLotsFromPolygons(
 		return [...base, ...orphans].sort((a, b) => a.x0 - b.x0);
 	}
 
+	const mergedA = mergeOrphans(sideA, orphanLotsA);
+	const mergedB = mergeOrphans(sideB, orphanLotsB);
+	const blockBbls = new Set<string>();
+	for (const l of [...mergedA, ...mergedB]) {
+		if (/^[1-5]\d{9}$/.test(l.bbl)) blockBbls.add(l.bbl);
+		for (const sf of l.storefronts) {
+			const sb = (sf.bbl || '').split('.')[0].trim();
+			if (/^[1-5]\d{9}$/.test(sb)) blockBbls.add(sb);
+		}
+	}
+
 	return {
 		clusterId,
 		segmentId: seg.id,
 		plutoLoaded,
 		plutoCount: features.length,
-		sideA: mergeOrphans(sideA, orphanLotsA),
-		sideB: mergeOrphans(sideB, orphanLotsB)
+		sideA: mergedA,
+		sideB: mergedB,
+		initialTenants: lookupPrebakedTenants(blockBbls)
 	};
 }
 
-const plutoCache = new Map<string, { at: number; data: BlockLotsResponse }>();
-const CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour in-isolate cache
+const plutoCache = new PersistentCache<BlockLotsResponse>(
+	'block-lots-v11',
+	1000 * 60 * 60 * 24 * 7, // fresh 7 days (NYC parcel boundaries rarely change!)
+	3500,
+	1000 * 60 * 60 * 24 * 60 // SWR up to 60 days
+);
+const shardMemCache = new Map<string, ClusterShard>();
 
-export const GET: RequestHandler = async ({ url, fetch }) => {
-	const clusterId = url.searchParams.get('cluster') || '';
-	const segmentId = url.searchParams.get('segment') || '';
-
-	if (!/^c-\d+$/.test(clusterId) || !/^seg-\d+$/.test(segmentId)) {
-		throw error(400, 'Invalid cluster or segment identifier');
+async function loadFreshBlockLots(
+	clusterId: string,
+	segmentId: string,
+	fetchFn: typeof fetch
+): Promise<BlockLotsResponse> {
+	let shard = shardMemCache.get(clusterId);
+	if (!shard) {
+		const shardRes = await fetchFn(`/data/clusters/${clusterId}.json`);
+		if (!shardRes.ok) throw error(404, `Cluster ${clusterId} not found`);
+		shard = (await shardRes.json()) as ClusterShard;
+		shardMemCache.set(clusterId, shard);
 	}
-
-	const cacheKey = `v10:${clusterId}:${segmentId}`;
-	const cached = plutoCache.get(cacheKey);
-	if (cached && Date.now() - cached.at < CACHE_TTL_MS && cached.data.plutoLoaded) {
-		return json(cached.data, {
-			headers: { 'Cache-Control': dev ? 'no-store' : 'public, max-age=3600, s-maxage=86400' }
-		});
-	}
-
-	const shardRes = await fetch(`/data/clusters/${clusterId}.json`);
-	if (!shardRes.ok) throw error(404, `Cluster ${clusterId} not found`);
-	const shard: ClusterShard = await shardRes.json();
 
 	const seg = shard.segmentDetails[segmentId];
 	if (!seg) throw error(404, `Segment ${segmentId} not found in cluster ${clusterId}`);
@@ -964,7 +976,7 @@ export const GET: RequestHandler = async ({ url, fetch }) => {
 	for (let attempt = 0; attempt < 2 && !plutoLoaded; attempt++) {
 		try {
 			const controller = new AbortController();
-			const timer = setTimeout(() => controller.abort(), 7500);
+			const timer = setTimeout(() => controller.abort(), 5500);
 			const pRes = await globalThis.fetch(mapPlutoUrl, {
 				signal: controller.signal,
 				headers: { Accept: 'application/json' }
@@ -982,17 +994,46 @@ export const GET: RequestHandler = async ({ url, fetch }) => {
 		}
 	}
 
-	const payload = buildBlockLotsFromPolygons(clusterId, seg, features, plutoLoaded);
-	if (plutoLoaded) {
-		plutoCache.set(cacheKey, { at: Date.now(), data: payload });
+	return buildBlockLotsFromPolygons(clusterId, seg, features, plutoLoaded);
+}
+
+export const GET: RequestHandler = async ({ url, fetch }) => {
+	const clusterId = url.searchParams.get('cluster') || '';
+	const segmentId = url.searchParams.get('segment') || '';
+
+	if (!/^c-\d+$/.test(clusterId) || !/^seg-\d+$/.test(segmentId)) {
+		throw error(400, 'Invalid cluster or segment identifier');
+	}
+
+	const cacheKey = `v11:${clusterId}:${segmentId}`;
+	const cached = plutoCache.getWithStatus(cacheKey);
+	if (cached && cached.data.plutoLoaded) {
+		if (cached.stale) {
+			plutoCache.revalidate(cacheKey, async () => {
+				const fresh = await loadFreshBlockLots(clusterId, segmentId, fetch);
+				return fresh.plutoLoaded ? fresh : null;
+			});
+		}
+		return json(cached.data, {
+			headers: {
+				'Cache-Control': dev
+					? 'no-store'
+					: 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800'
+			}
+		});
+	}
+
+	const payload = await loadFreshBlockLots(clusterId, segmentId, fetch);
+	if (payload.plutoLoaded) {
+		plutoCache.set(cacheKey, payload);
 	}
 
 	return json(payload, {
 		headers: {
 			'Cache-Control': dev
 				? 'no-store'
-				: plutoLoaded
-					? 'public, max-age=3600, s-maxage=86400'
+				: payload.plutoLoaded
+					? 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800'
 					: 'public, max-age=60'
 		}
 	});

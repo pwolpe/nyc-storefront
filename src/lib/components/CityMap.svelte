@@ -295,6 +295,8 @@
 			);
 
 			let hoveredId: string | null = null;
+			const warmedClusters = new Set<string>();
+			let clusterWarmTimer: ReturnType<typeof setTimeout> | null = null;
 			map.on('mousemove', 'clusters-fill', (e) => {
 				if (!map || !e.features?.length) return;
 				map.getCanvas().style.cursor = 'pointer';
@@ -305,6 +307,13 @@
 					hovered = c;
 					setSpotlight(id);
 					renderEdgeLabels(c);
+					if (clusterWarmTimer) clearTimeout(clusterWarmTimer);
+					if (!warmedClusters.has(id)) {
+						clusterWarmTimer = setTimeout(() => {
+							warmedClusters.add(id);
+							fetch(`/data/clusters/${id}.json`, { priority: 'low' as RequestPriority }).catch(() => {});
+						}, 110);
+					}
 				}
 			});
 

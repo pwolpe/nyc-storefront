@@ -2,6 +2,7 @@
 	import type { PageData } from './$types';
 	import type { BlockLot, BlockTenantInfo, BlockTenantsResponse } from '$lib/types';
 	import { pct, rateTone, signedNum } from '$lib/format';
+	import { blockTenantsClientCache, warmBlock, warmBuilding } from '$lib/clientCache';
 	import TopBar from '$lib/components/TopBar.svelte';
 	import BlockElevation from '$lib/components/BlockElevation.svelte';
 	import ShareButton from '$lib/components/ShareButton.svelte';
@@ -85,9 +86,11 @@
 	const plutoLoaded = $derived(Boolean(lotsData && lotsData.segmentId === seg.id && lotsData.plutoLoaded));
 	const loadingLots = false;
 
-	// Non-blocking enrichment: fetch live NYC DOHMH restaurants, DCWP licensed businesses & DOF vacancy streaks
+	// Non-blocking enrichment: immediately seed with 0ms pre-baked business names from SSR lotsData,
+	// then hydrate 2019–2025 Time Machine & live Socrata updates (with 0ms client cache on revisit!)
 	$effect(() => {
 		const lots = [...activeSideA, ...activeSideB];
+		const initial = lotsData?.initialTenants ?? {};
 		const bblSet = new Set<string>();
 		const vacSet = new Set<string>();
 		for (const l of lots) {
@@ -105,20 +108,34 @@
 		}
 
 		if (bblSet.size === 0) {
-			tenantsByBbl = {};
+			tenantsByBbl = initial;
 			availableYears = [];
 			return;
 		}
 
+		const sortedBbls = [...bblSet].sort();
+		const sortedVac = [...vacSet].sort();
+		const cacheKey = `${sortedBbls.join(',')}|${sortedVac.join(',')}`;
+		const clientHit = blockTenantsClientCache.get(cacheKey);
+		if (clientHit) {
+			tenantsByBbl = clientHit.byBbl;
+			availableYears = clientHit.years ?? [];
+			return;
+		}
+
+		// Instant 0ms paint of pre-baked NYC business names while live Socrata history hydrates
+		tenantsByBbl = initial;
+
 		const controller = new AbortController();
 		const params = new URLSearchParams({
-			bbls: [...bblSet].join(','),
-			vacant: [...vacSet].join(',')
+			bbls: sortedBbls.join(','),
+			vacant: sortedVac.join(',')
 		});
 		fetch(`/api/block-tenants?${params.toString()}`, { signal: controller.signal })
 			.then((r) => (r.ok ? r.json() : null))
 			.then((res: BlockTenantsResponse | null) => {
 				if (res?.byBbl && !controller.signal.aborted) {
+					blockTenantsClientCache.set(cacheKey, res);
 					tenantsByBbl = res.byBbl;
 					availableYears = res.years ?? [];
 				}
@@ -126,6 +143,27 @@
 			.catch(() => {});
 
 		return () => controller.abort();
+	});
+
+	// Predictive Spatial Pre-Warming: quietly warm the 4 adjacent blocks + top vacant/commercial buildings
+	// 550ms after landing so walking via arrow keys or clicking a storefront opens instantaneously!
+	$effect(() => {
+		const nav = seg.nav;
+		const lots = [...activeSideA, ...activeSideB];
+		const timer = setTimeout(() => {
+			if (nav) {
+				for (const target of [nav.left, nav.right, nav.up, nav.down]) {
+					if (target) warmBlock(target.clusterId, target.segId);
+				}
+			}
+			const featuredBbls = lots
+				.filter((l) => /^[1-5]\d{9}$/.test(l.bbl) && (l.vacantCount > 0 || l.storefronts.length > 0))
+				.sort((a, b) => b.vacantCount - a.vacantCount || b.storefronts.length - a.storefronts.length)
+				.slice(0, 4)
+				.map((l) => l.bbl);
+			for (const b of featuredBbls) warmBuilding(b);
+		}, 550);
+		return () => clearTimeout(timer);
 	});
 </script>
 

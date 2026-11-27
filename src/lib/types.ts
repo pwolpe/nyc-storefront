@@ -308,6 +308,7 @@ export interface BlockLotsResponse {
 	plutoCount: number;
 	sideA: BlockLot[];
 	sideB: BlockLot[];
+	initialTenants?: Record<string, BlockTenantInfo>;
 }
 
 export interface TenantRecord {
