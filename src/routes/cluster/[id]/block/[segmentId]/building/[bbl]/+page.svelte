@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import type { PageData } from './$types';
-	import { extractDoorNeighbors, type DoorNeighbor } from './+page';
+	import { _extractDoorNeighbors, type DoorNeighbor } from './+page';
 	import type {
 		BlockLotsResponse,
 		BuildingDossier,
@@ -450,7 +450,7 @@
 		const lotsKey = `${cid}:${sid}`;
 		const cachedLots = blockLotsClientCache.get(lotsKey);
 		if (cachedLots) {
-			const n = extractDoorNeighbors(cachedLots, targetBbl);
+			const n = _extractDoorNeighbors(cachedLots, targetBbl);
 			asyncNeighbors = { key, prev: n.prevBuilding, next: n.nextBuilding };
 			return;
 		}
@@ -466,7 +466,7 @@
 			})
 			.then((lots) => {
 				if (cancelled || !lots) return;
-				const n = extractDoorNeighbors(lots, targetBbl);
+				const n = _extractDoorNeighbors(lots, targetBbl);
 				asyncNeighbors = { key, prev: n.prevBuilding, next: n.nextBuilding };
 			})
 			.catch(() => {});

@@ -20,7 +20,7 @@ function shortNeighborLabel(lot: BlockLot): string {
 		.replace(/\bEast\b(?=\s+\d)/i, 'E');
 }
 
-export function extractDoorNeighbors(
+export function _extractDoorNeighbors(
 	lotsData: BlockLotsResponse | null,
 	targetBbl: string
 ): {
@@ -73,7 +73,7 @@ export function extractDoorNeighbors(
 	return { prevBuilding, nextBuilding, sidewalkLabel };
 }
 
-export function findBblAliases(lots: BlockLotsResponse | null, targetBbl: string): string[] {
+function findBblAliases(lots: BlockLotsResponse | null, targetBbl: string): string[] {
 	if (!lots) return [];
 	const all = [...(lots.sideA || []), ...(lots.sideB || [])];
 	const lot = all.find(
@@ -111,7 +111,7 @@ export const load: PageLoad = async ({ params, fetch }) => {
 		if (!segment) {
 			throw error(404, `Block "${params.segmentId}" not found in cluster "${params.id}"`);
 		}
-		const { prevBuilding, nextBuilding, sidewalkLabel } = extractDoorNeighbors(
+		const { prevBuilding, nextBuilding, sidewalkLabel } = _extractDoorNeighbors(
 			cachedLots,
 			params.bbl
 		);
@@ -168,7 +168,7 @@ export const load: PageLoad = async ({ params, fetch }) => {
 		}
 	}
 
-	const { prevBuilding, nextBuilding, sidewalkLabel } = extractDoorNeighbors(lotsData, params.bbl);
+	const { prevBuilding, nextBuilding, sidewalkLabel } = _extractDoorNeighbors(lotsData, params.bbl);
 
 	return {
 		shard,
