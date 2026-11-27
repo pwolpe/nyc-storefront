@@ -43,6 +43,8 @@
 	let showAllRows = $state(false);
 	let hoveredYear = $state<number | null>(null);
 	let pinnedYear = $state<number | null>(null);
+	let unitDrawer = $state<{ year: number; unitIdx: number | null; filter: 'all' | 'vacant' } | null>(null);
+	let evidenceEl = $state<HTMLElement | null>(null);
 
 	interface AiBriefState {
 		bbl: string;
@@ -347,6 +349,7 @@
 		showAllRows = false;
 		hoveredYear = null;
 		pinnedYear = null;
+		unitDrawer = null;
 
 		const applyDossier = (json: BuildingDossier) => {
 			dossier = json;
@@ -639,6 +642,93 @@
 	const inspectedYearCell = $derived.by(() => {
 		const targetYr = hoveredYear ?? pinnedYear ?? dossier?.dofHistory[0]?.year ?? 2025;
 		return timelineYears.find((c) => c.year === targetYr) ?? timelineYears[timelineYears.length - 1];
+	});
+
+	// Order units in a year's DOF record with vacant units first so red bars map 1-to-1 to rows
+	function orderedUnits(rec: BuildingDofYear | null | undefined) {
+		if (!rec) return [];
+		return [...rec.units].sort((a, b) => Number(b.vacant) - Number(a.vacant));
+	}
+
+	function shortUnitAddr(addr: string | undefined): string {
+		if (!addr) return '';
+		const clean = addr.trim();
+		const bldg = (dossier?.address || '').trim();
+		if (!clean || clean.toLowerCase() === bldg.toLowerCase()) return '';
+		return clean;
+	}
+
+	function unitTrackRecord(addr: string, upToYear: number): string | null {
+		if (!dossier || !addr) return null;
+		const norm = addr.toLowerCase().replace(/[^a-z0-9]/g, '');
+		if (!norm) return null;
+		const matching: Array<{ year: number; vacant: boolean }> = [];
+		for (const yr of dossier.dofHistory) {
+			if (yr.year > upToYear) continue;
+			const hits = yr.units.filter((u) => u.address.toLowerCase().replace(/[^a-z0-9]/g, '') === norm);
+			if (hits.length > 0) {
+				matching.push({ year: yr.year, vacant: hits.some((h) => h.vacant) });
+			}
+		}
+		if (matching.length < 2) return null;
+		matching.sort((a, b) => b.year - a.year);
+		if (matching[0].vacant) {
+			let streak = 0;
+			let sinceYr = matching[0].year;
+			for (const m of matching) {
+				if (m.vacant) {
+					streak++;
+					sinceYr = m.year;
+				} else break;
+			}
+			const wasOpenBefore = matching.some((m) => m.year < sinceYr && !m.vacant);
+			if (streak >= 2) {
+				return wasOpenBefore
+					? `Vacant ${streak} yrs (since ${sinceYr})`
+					: `Vacant ${streak} yrs (${sinceYr}–${matching[0].year})`;
+			}
+			if (wasOpenBefore) return `Went vacant in ${sinceYr}`;
+		} else {
+			const priorVac = matching.find((m) => m.year < matching[0].year && m.vacant);
+			if (priorVac) return `Recovered since ${priorVac.year}`;
+		}
+		return null;
+	}
+
+	function openUnitDrawer(year: number, unitIdx: number | null = null, filter: 'all' | 'vacant' = 'all') {
+		pinnedYear = year;
+		if (
+			unitDrawer &&
+			unitDrawer.year === year &&
+			unitDrawer.unitIdx === unitIdx &&
+			unitDrawer.filter === filter
+		) {
+			unitDrawer = null;
+		} else {
+			unitDrawer = { year, unitIdx, filter };
+		}
+	}
+
+	function jumpToFullDofHistory() {
+		activeTab = 'dof';
+		showAllRows = true;
+		evidenceEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	}
+
+	const drawerYearRec = $derived.by(() => {
+		if (!unitDrawer || !dossier) return null;
+		return dossier.dofHistory.find((y) => y.year === unitDrawer!.year) ?? null;
+	});
+
+	const drawerUnits = $derived.by(() => {
+		const all = orderedUnits(drawerYearRec);
+		if (!unitDrawer) return [];
+		if (unitDrawer.filter === 'vacant') {
+			return all
+				.map((u, idx) => ({ u, idx }))
+				.filter(({ u }) => u.vacant);
+		}
+		return all.map((u, idx) => ({ u, idx }));
 	});
 
 	const buildingTrajectory = $derived.by(() => {
@@ -1097,15 +1187,32 @@
 				>
 					{#each timelineYears as cell (cell.year)}
 						{@const rec = cell.rec}
+						{@const units = orderedUnits(rec)}
 						{@const useBlocks = maxTimelineUnits <= 6}
 						{@const isActiveYr = inspectedYearCell?.year === cell.year}
-						<button
-							type="button"
+						{@const isDrawerYr = unitDrawer?.year === cell.year}
+						<div
+							role="button"
+							tabindex="0"
 							class="occ-col state-{cell.state}"
 							class:active={isActiveYr}
+							class:drawer-open={isDrawerYr}
 							onmouseenter={() => (hoveredYear = cell.year)}
 							onfocus={() => (hoveredYear = cell.year)}
-							onclick={() => (pinnedYear = pinnedYear === cell.year ? null : cell.year)}
+							onclick={() => {
+								if (rec && rec.units.length > 0) {
+									openUnitDrawer(cell.year, null, rec.vacant > 0 ? 'all' : 'all');
+								} else {
+									pinnedYear = pinnedYear === cell.year ? null : cell.year;
+									unitDrawer = null;
+								}
+							}}
+							onkeydown={(e) => {
+								if (e.key === 'Enter' || e.key === ' ') {
+									e.preventDefault();
+									if (rec && rec.units.length > 0) openUnitDrawer(cell.year, null, 'all');
+								}
+							}}
 						>
 							<span class="occ-ratio">
 								{#if rec}
@@ -1121,17 +1228,21 @@
 								{#if rec && rec.total > 0}
 									{#if useBlocks}
 										<div class="unit-stack">
-											{#each Array(rec.vacant) as _}
-												<span
-													class="u-blk vac"
+											{#each units as u, uIdx}
+												<button
+													type="button"
+													class="u-blk"
+													class:vac={u.vacant}
+													class:occ={!u.vacant}
+													class:selected={isDrawerYr && unitDrawer?.unitIdx === uIdx}
 													style="height: {Math.max(8, Math.floor((62 - (maxTimelineUnits - 1) * 3) / maxTimelineUnits))}px"
-												></span>
-											{/each}
-											{#each Array(rec.occupied) as _}
-												<span
-													class="u-blk occ"
-													style="height: {Math.max(8, Math.floor((62 - (maxTimelineUnits - 1) * 3) / maxTimelineUnits))}px"
-												></span>
+													title="{u.vacant ? 'Vacant' : u.activity}{u.address ? ` · ${u.address}` : ''}{u.leaseExpiry ? ` (Lease ${u.vacant ? 'ended' : 'thru'} ${formatMonthYear(u.leaseExpiry)})` : ''} — click to inspect"
+													aria-label="Inspect {cell.year} {u.vacant ? 'vacant' : 'open'} storefront{u.address ? ` at ${u.address}` : ''}"
+													onclick={(e) => {
+														e.stopPropagation();
+														openUnitDrawer(cell.year, uIdx, 'all');
+													}}
+												></button>
 											{/each}
 										</div>
 									{:else}
@@ -1139,8 +1250,32 @@
 										{@const vacH = Math.round((rec.vacant / rec.total) * barH)}
 										{@const occH = barH - vacH}
 										<div class="prop-bar" style="height: {barH}px">
-											{#if vacH > 0}<span class="pb-vac" style="height: {vacH}px"></span>{/if}
-											{#if occH > 0}<span class="pb-occ" style="height: {occH}px"></span>{/if}
+											{#if vacH > 0}
+												<button
+													type="button"
+													class="pb-vac"
+													style="height: {vacH}px"
+													title="{rec.vacant} vacant storefront{rec.vacant === 1 ? '' : 's'} in {cell.year} — click to inspect"
+													aria-label="Inspect {rec.vacant} vacant storefronts in {cell.year}"
+													onclick={(e) => {
+														e.stopPropagation();
+														openUnitDrawer(cell.year, null, 'vacant');
+													}}
+												></button>
+											{/if}
+											{#if occH > 0}
+												<button
+													type="button"
+													class="pb-occ"
+													style="height: {occH}px"
+													title="{rec.occupied} open storefront{rec.occupied === 1 ? '' : 's'} in {cell.year} — click to inspect"
+													aria-label="Inspect {rec.occupied} open storefronts in {cell.year}"
+													onclick={(e) => {
+														e.stopPropagation();
+														openUnitDrawer(cell.year, null, 'all');
+													}}
+												></button>
+											{/if}
 										</div>
 									{/if}
 								{:else}
@@ -1152,39 +1287,146 @@
 								<span class="occ-yr">{cell.year}</span>
 								<span class="occ-sub" title={cell.sub}>{cell.sub}</span>
 							</div>
-						</button>
+						</div>
 					{/each}
 				</div>
 
-				<!-- Interactive Year Inspector Strip (updates on hover or click of any year column) -->
+				<!-- Interactive Year Inspector Strip (updates on hover; click any bar/chip for full unit breakdown) -->
 				{#if inspectedYearCell}
-					<div class="year-inspector" aria-live="polite">
-						<span class="yi-yr">{inspectedYearCell.year}</span>
-						{#if inspectedYearCell.rec}
-							{@const r = inspectedYearCell.rec}
-							<span class="yi-summary">
-								{r.vacant === 0
-									? `All ${r.occupied} ${r.occupied === 1 ? 'storefront' : 'storefronts'} open`
-									: `${r.vacant} of ${r.total} empty`}
-							</span>
-							<div class="yi-units">
-								{#each r.units.slice(0, 4) as u}
-									<span class="yi-chip" class:vac={u.vacant}>
-										{u.vacant ? 'Vacant' : u.activity}
-										{#if u.leaseExpiry}
-											<em>· {u.vacant ? 'ended' : 'thru'} {formatMonthYear(u.leaseExpiry)}</em>
+					{@const inspUnits = orderedUnits(inspectedYearCell.rec)}
+					<div class="year-inspector-wrap">
+						<div class="year-inspector" aria-live="polite">
+							<span class="yi-yr">{inspectedYearCell.year}</span>
+							{#if inspectedYearCell.rec}
+								{@const r = inspectedYearCell.rec}
+								<span class="yi-summary">
+									{r.vacant === 0
+										? `All ${r.occupied} ${r.occupied === 1 ? 'storefront' : 'storefronts'} open`
+										: `${r.vacant} of ${r.total} empty`}
+								</span>
+								<div class="yi-units">
+									{#each inspUnits.slice(0, 4) as u, uIdx}
+										{@const addrHint = shortUnitAddr(u.address)}
+										<button
+											type="button"
+											class="yi-chip clickable"
+											class:vac={u.vacant}
+											class:selected={unitDrawer?.year === inspectedYearCell.year && unitDrawer?.unitIdx === uIdx}
+											onclick={() => openUnitDrawer(inspectedYearCell.year, uIdx, 'all')}
+											title="Click to inspect {u.address || 'this unit'}"
+										>
+											{u.vacant ? 'Vacant' : u.activity}
+											{#if addrHint}
+												<em>· {addrHint}</em>
+											{/if}
+											{#if u.leaseExpiry}
+												<em>· {u.vacant ? 'ended' : 'thru'} {formatMonthYear(u.leaseExpiry)}</em>
+											{/if}
+											{#if u.construction}
+												<em>· Construction</em>
+											{/if}
+										</button>
+									{/each}
+									{#if inspUnits.length > 4}
+										<button
+											type="button"
+											class="yi-more-btn"
+											onclick={() => openUnitDrawer(inspectedYearCell.year, null, 'all')}
+										>
+											+{inspUnits.length - 4} more ▾
+										</button>
+									{:else}
+										<button
+											type="button"
+											class="yi-more-btn"
+											onclick={() => openUnitDrawer(inspectedYearCell.year, null, 'all')}
+										>
+											{unitDrawer?.year === inspectedYearCell.year ? 'Hide details ▴' : 'Details ▾'}
+										</button>
+									{/if}
+								</div>
+							{:else}
+								<span class="yi-summary muted">No city storefront filing on record for {inspectedYearCell.year}.</span>
+							{/if}
+						</div>
+
+						{#if unitDrawer && drawerYearRec}
+							<div class="unit-drawer" role="region" aria-label="{unitDrawer.year} storefront unit details">
+								<div class="ud-head">
+									<div class="ud-title-group">
+										<span class="ud-kicker">{unitDrawer.year} NYC DOF FILING · {drawerYearRec.total} {drawerYearRec.total === 1 ? 'UNIT' : 'UNITS'}</span>
+										{#if drawerYearRec.vacant > 0 && drawerYearRec.occupied > 0}
+											<div class="ud-filters" role="group" aria-label="Filter units">
+												<button
+													type="button"
+													class="ud-fbtn"
+													class:active={unitDrawer.filter === 'vacant'}
+													onclick={() => (unitDrawer = { ...unitDrawer!, filter: 'vacant', unitIdx: null })}
+												>
+													Vacant ({drawerYearRec.vacant})
+												</button>
+												<button
+													type="button"
+													class="ud-fbtn"
+													class:active={unitDrawer.filter === 'all'}
+													onclick={() => (unitDrawer = { ...unitDrawer!, filter: 'all', unitIdx: null })}
+												>
+													All ({drawerYearRec.total})
+												</button>
+											</div>
 										{/if}
-										{#if u.construction}
-											<em>· Construction</em>
-										{/if}
-									</span>
-								{/each}
-								{#if r.units.length > 4}
-									<span class="yi-more">+{r.units.length - 4} more</span>
-								{/if}
+									</div>
+									<div class="ud-actions">
+										<button type="button" class="ud-jump" onclick={jumpToFullDofHistory}>
+											All 2019–2025 filings ↓
+										</button>
+										<button
+											type="button"
+											class="ud-close"
+											onclick={() => (unitDrawer = null)}
+											aria-label="Close unit details"
+										>
+											×
+										</button>
+									</div>
+								</div>
+
+								<div class="ud-list">
+									{#each drawerUnits as { u, idx }}
+										{@const track = unitTrackRecord(u.address, unitDrawer.year)}
+										<div
+											class="ud-row"
+											class:vac={u.vacant}
+											class:highlighted={unitDrawer.unitIdx === idx}
+										>
+											<div class="ud-main">
+												<span class="ud-dot" class:vac={u.vacant}></span>
+												<strong class="ud-addr">{u.address || dossier.address}</strong>
+												<span class="ud-pill" class:vac={u.vacant}>{u.vacant ? 'Vacant' : 'Open'}</span>
+												{#if u.construction}
+													<span class="ud-flag">Construction</span>
+												{/if}
+											</div>
+											<div class="ud-meta">
+												{#if !u.vacant && u.activity && u.activity !== 'Commercial'}
+													<span>{u.activity}</span>
+												{:else if u.vacant && u.activity && u.activity !== 'No business reported' && u.activity !== 'Commercial'}
+													<span>Prior: {u.activity}</span>
+												{/if}
+												{#if u.leaseExpiry}
+													<span>Lease {u.vacant ? 'ended' : 'thru'} {formatMonthYear(u.leaseExpiry)}</span>
+												{/if}
+												{#if track}
+													<span class="ud-track" class:vac={u.vacant}>{track}</span>
+												{/if}
+												{#if !u.leaseExpiry && !track && (!u.activity || u.activity === 'No business reported' || u.activity === 'Commercial')}
+													<span class="ud-muted">{u.vacant ? 'Reported vacant in DOF filing' : 'Reported occupied in DOF filing'}</span>
+												{/if}
+											</div>
+										</div>
+									{/each}
+								</div>
 							</div>
-						{:else}
-							<span class="yi-summary muted">No city storefront filing on record for {inspectedYearCell.year}.</span>
 						{/if}
 					</div>
 				{/if}
@@ -1217,7 +1459,7 @@
 			</section>
 
 			<!-- 3. Single Compact Tabbed Evidence Panel (replaces 4 giant scrolling lists) -->
-			<section class="evidence-card surface">
+			<section class="evidence-card surface" bind:this={evidenceEl}>
 				<div class="ev-tabs" role="tablist" aria-label="Official NYC building records">
 					<button
 						type="button"
@@ -2218,15 +2460,26 @@
 		border-color: var(--line);
 	}
 
+	.occ-col.drawer-open {
+		background: var(--panel);
+		border-color: var(--ink);
+	}
+
+	.year-inspector-wrap {
+		display: flex;
+		flex-direction: column;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--rule);
+		background: var(--page);
+		overflow: hidden;
+	}
+
 	.year-inspector {
 		display: flex;
 		align-items: center;
 		flex-wrap: wrap;
 		gap: 8px 10px;
 		padding: 8px 11px;
-		border-radius: var(--radius-sm);
-		background: var(--page);
-		border: 1px solid var(--rule);
 		font-size: 12px;
 	}
 
@@ -2257,12 +2510,27 @@
 	}
 
 	.yi-chip {
+		border: 1px solid transparent;
 		font-family: var(--font-mono);
 		font-size: 10.5px;
 		padding: 2px 7px;
 		border-radius: 4px;
 		background: var(--green-bg);
 		color: var(--green);
+	}
+
+	.yi-chip.clickable {
+		cursor: pointer;
+		transition: border-color 0.1s ease, filter 0.1s ease;
+	}
+
+	.yi-chip.clickable:hover {
+		border-color: currentColor;
+	}
+
+	.yi-chip.selected {
+		border-color: var(--ink);
+		box-shadow: 0 0 0 1px var(--ink);
 	}
 
 	.yi-chip.vac {
@@ -2275,9 +2543,227 @@
 		opacity: 0.85;
 	}
 
-	.yi-more {
+	.yi-more-btn {
+		border: 1px solid var(--rule);
+		background: var(--panel);
+		border-radius: 4px;
+		padding: 2px 7px;
 		font-family: var(--font-mono);
 		font-size: 10.5px;
+		font-weight: 500;
+		color: var(--ink-soft);
+		cursor: pointer;
+		transition: border-color 0.1s ease, color 0.1s ease;
+	}
+
+	.yi-more-btn:hover {
+		border-color: var(--ink);
+		color: var(--ink);
+	}
+
+	/* Inline Unit Breakdown Drawer (opens when clicking red/green unit bars or inspector chips) */
+	.unit-drawer {
+		border-top: 1px solid var(--rule);
+		background: var(--panel);
+		padding: 10px 12px 11px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.ud-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+		flex-wrap: wrap;
+	}
+
+	.ud-title-group {
+		display: inline-flex;
+		align-items: center;
+		gap: 10px;
+		flex-wrap: wrap;
+	}
+
+	.ud-kicker {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.06em;
+		color: var(--muted);
+	}
+
+	.ud-filters {
+		display: inline-flex;
+		padding: 2px;
+		border-radius: 5px;
+		background: var(--page);
+		border: 1px solid var(--rule);
+		gap: 2px;
+	}
+
+	.ud-fbtn {
+		border: 0;
+		background: transparent;
+		padding: 2px 7px;
+		border-radius: 3px;
+		font-family: var(--font-mono);
+		font-size: 10px;
+		font-weight: 500;
+		color: var(--muted);
+		cursor: pointer;
+	}
+
+	.ud-fbtn:hover {
+		color: var(--ink);
+	}
+
+	.ud-fbtn.active {
+		background: var(--ink);
+		color: #ffffff;
+	}
+
+	.ud-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.ud-jump {
+		border: 0;
+		background: transparent;
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		font-weight: 500;
+		color: var(--muted);
+		cursor: pointer;
+		padding: 2px 4px;
+	}
+
+	.ud-jump:hover {
+		color: var(--accent);
+	}
+
+	.ud-close {
+		border: 0;
+		background: transparent;
+		font-size: 15px;
+		line-height: 1;
+		color: var(--muted);
+		cursor: pointer;
+		padding: 0 4px;
+	}
+
+	.ud-close:hover {
+		color: var(--ink);
+	}
+
+	.ud-list {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+	}
+
+	.ud-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+		flex-wrap: wrap;
+		padding: 6px 9px;
+		border-radius: 5px;
+		border: 1px solid var(--rule);
+		background: var(--page);
+		font-size: 12px;
+	}
+
+	.ud-row.vac {
+		background: #fdf6f5;
+		border-color: #f0d4cf;
+	}
+
+	.ud-row.highlighted {
+		border-color: var(--ink);
+		box-shadow: inset 3px 0 0 var(--ink);
+	}
+
+	.ud-row.vac.highlighted {
+		border-color: var(--red);
+		box-shadow: inset 3px 0 0 var(--red);
+	}
+
+	.ud-main {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+		min-width: 0;
+	}
+
+	.ud-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 99px;
+		background: var(--green);
+		flex: none;
+	}
+
+	.ud-dot.vac {
+		background: var(--red);
+	}
+
+	.ud-addr {
+		font-weight: 600;
+		color: var(--ink);
+	}
+
+	.ud-pill {
+		font-family: var(--font-mono);
+		font-size: 9.5px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		padding: 1px 5px;
+		border-radius: 3px;
+		background: var(--green-bg);
+		color: var(--green);
+	}
+
+	.ud-pill.vac {
+		background: var(--red-bg);
+		color: var(--red);
+	}
+
+	.ud-flag {
+		font-family: var(--font-mono);
+		font-size: 9.5px;
+		font-weight: 600;
+		padding: 1px 5px;
+		border-radius: 3px;
+		background: var(--amber-bg);
+		color: var(--amber);
+	}
+
+	.ud-meta {
+		display: inline-flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 6px 10px;
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		color: var(--ink-soft);
+	}
+
+	.ud-track {
+		font-weight: 600;
+		color: var(--green);
+	}
+
+	.ud-track.vac {
+		color: var(--red);
+	}
+
+	.ud-muted {
 		color: var(--muted);
 	}
 
@@ -2320,8 +2806,25 @@
 
 	.u-blk {
 		width: 100%;
+		border: 0;
+		padding: 0;
 		border-radius: 3px;
 		display: block;
+		cursor: pointer;
+		transition: transform 0.1s ease, box-shadow 0.1s ease;
+	}
+
+	.u-blk:hover {
+		transform: scaleX(1.06);
+		box-shadow: 0 0 0 1.5px var(--ink);
+		position: relative;
+		z-index: 2;
+	}
+
+	.u-blk.selected {
+		box-shadow: 0 0 0 2px var(--ink);
+		position: relative;
+		z-index: 3;
 	}
 
 	.u-blk.occ,
@@ -2351,7 +2854,16 @@
 	.pb-vac,
 	.pb-occ {
 		width: 100%;
+		border: 0;
+		padding: 0;
 		display: block;
+		cursor: pointer;
+		transition: filter 0.1s ease;
+	}
+
+	.pb-vac:hover,
+	.pb-occ:hover {
+		filter: brightness(1.12);
 	}
 
 	.u-empty {

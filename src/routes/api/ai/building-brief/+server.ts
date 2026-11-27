@@ -17,7 +17,7 @@ interface BuildingBriefResponse {
 	error?: string;
 }
 
-const briefCache = new PersistentCache<BuildingBriefResponse>('ai-building-brief-v2', 1000 * 60 * 60 * 72, 1200);
+const briefCache = new PersistentCache<BuildingBriefResponse>('ai-building-brief-v3', 1000 * 60 * 60 * 72, 1200);
 const EDGE_TTL_SEC = 60 * 60 * 72; // 72 hours
 
 function cleanWebText(raw: string): { verdictTag?: string; summary: string } {
@@ -130,7 +130,7 @@ export const POST: RequestHandler = async ({ request, platform }) => {
 
 	// 2. Check Edge Cache if present
 	const edgeCache = getEdgeCache();
-	const edgeKey = new Request(`https://cache.nyc-storefront.internal/ai-brief/v2/${encodeURIComponent(bbl)}`);
+	const edgeKey = new Request(`https://cache.nyc-storefront.internal/ai-brief/v3/${encodeURIComponent(bbl)}`);
 	if (edgeCache) {
 		try {
 			const edgeHit = await edgeCache.match(edgeKey);
@@ -160,14 +160,27 @@ export const POST: RequestHandler = async ({ request, platform }) => {
 		c311Recent: (payload.c311Recent || []).slice(0, 3)
 	};
 
+	const todayLabel = new Date().toLocaleDateString('en-US', {
+		month: 'long',
+		day: 'numeric',
+		year: 'numeric'
+	});
+
 	const system = `You are a sharp NYC retail & urbanism reporter writing a concise "Field Note" for a single storefront building.
+Today's date is ${todayLabel}.
 Combine the provided NYC public records (DOF 2019-2025 filings, tenant/restaurant history, DOB permits, OATH, 311) WITH live web search for this exact address to report both the history and what is happening right now (current open business, recent closing, active build-out, or commercial lease listing).
+
+CRITICAL TEMPORAL RULES:
+- Always check the year of every web article, CB4/SLA letter, or city record relative to today (${todayLabel}).
+- NEVER write about a past year (such as 2022, 2023, 2024, or 2025) in present or future tense (e.g. NEVER say "slated to open in late 2023" or "aiming to open in 2024"). Frame older articles strictly in past tense ("In late 2023, ... applied for...") and cross-check newer 2025-2026 DOF/DOHMH/DCWP records to see what is actually open or empty today.
+- Base your VERDICT tag on the LATEST verified status (2025 DOF + 2025-2026 licenses, inspections, or recent web listings), not an outdated 2023-2024 proposal.
 
 Output format (strict, no markdown links, no bullets, no bolding):
 VERDICT: <2-3 word status tag like "Active listing", "Active buildout", "Recent turnover", "Long-term dark", "Open & busy", or "Mixed ground floor">
 <2-3 tight journalistic sentences, max 68 words total. Name specific past/current businesses, dates, permits, or brokerage listings only when verified. Never fabricate openings or closings; if live web has nothing new, synthesize the NYC records crisply.>`;
 
-	const user = `NYC storefront: ${payload.address || bbl}, ${payload.borough || 'New York'}, NY ${payload.zipcode || ''}.
+	const user = `Today's date: ${todayLabel}.
+NYC storefront: ${payload.address || bbl}, ${payload.borough || 'New York'}, NY ${payload.zipcode || ''}.
 Structured NYC public records:
 ${JSON.stringify(compactFacts)}`;
 

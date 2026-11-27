@@ -109,7 +109,14 @@ export const POST: RequestHandler = async ({ request, platform }) => {
 	const bigSwing = Math.abs(payload.yoyChange ?? 0) >= 3.0 || (payload.rate ?? 0) >= 18;
 	const useOnline = topBldgShare >= 22 || bigSwing;
 
+	const todayLabel = new Date().toLocaleDateString('en-US', {
+		month: 'long',
+		day: 'numeric',
+		year: 'numeric'
+	});
+
 	const system = `You are a sharp NYC retail & urban data editor writing a concise 2-sentence "Spatial Takeaway" (max 56 words total) for a neighborhood storefront cluster.
+Today's date is ${todayLabel}. Never describe past years (2022-2025) in future tense; frame older articles in past tense relative to ${todayLabel}.
 CRITICAL: Explain *why* the vacancy rate looks the way it does — don't just restate numbers!
 - Check "topVacantBuildings" first: if 1 or 2 buildings account for a large share of all empty storefronts (e.g. a major warehouse/redevelopment like Terminal Warehouse at 261 11th Ave or Starrett-Lehigh at 601 W 26th St, or a single large corner lot), NAME that building/address and explain whether the spike comes from newly built unleased bays, a known redevelopment/closing, or broad street-level vacancies.
 - Contrast busy vs. empty streets inside the cluster when relevant.
