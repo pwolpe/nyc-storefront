@@ -90,12 +90,8 @@
 				</p>
 
 				<p>
-					I’m Paul Wolpe (<a
-						href="https://github.com/pwolpe/"
-						target="_blank"
-						rel="noopener noreferrer">GitHub ↗</a
-					>), a New Yorker who cares a lot about seeing this city thrive and bring in new jobs. I’m
-					also the co-founder and treasurer of the
+					I’m a New Yorker who cares a lot about seeing this city thrive and bring in new jobs, and
+					the co-founder and treasurer of the
 					<strong>Wonderful West 15th Street Block Association</strong>, where you see up close
 					every day how much a single empty storefront, or one great new neighbor, shapes the feel
 					of a block.
@@ -107,7 +103,7 @@
 					<a
 						href="https://github.com/pwolpe/nyc-storefront"
 						target="_blank"
-						rel="noopener noreferrer">github.com/pwolpe/nyc-storefront ↗</a
+						rel="noopener noreferrer">GitHub ↗</a
 					>, so journalists, researchers, block associations, or other cities are welcome to use,
 					inspect, and build on it.
 				</p>
@@ -169,14 +165,7 @@
 
 			<div class="foot-row">
 				<a href="/" class="back-btn">← Back to NYC Map</a>
-				<a
-					href="https://github.com/pwolpe/nyc-storefront"
-					target="_blank"
-					rel="noopener noreferrer"
-					class="gh-link"
-				>
-					github.com/pwolpe/nyc-storefront (MIT) ↗
-				</a>
+				<span class="foot-meta">MIT Open Source</span>
 			</div>
 		</article>
 	</main>
@@ -364,7 +353,7 @@
 	}
 
 	.back-btn,
-	.gh-link {
+	.foot-meta {
 		font-family: var(--font-mono);
 		font-size: 11.5px;
 		font-weight: 500;
@@ -376,8 +365,7 @@
 		color: var(--ink);
 	}
 
-	.back-btn:hover,
-	.gh-link:hover {
+	.back-btn:hover {
 		color: var(--accent);
 	}
 
