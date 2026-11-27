@@ -65,7 +65,7 @@ function cleanBusinessName(raw: string): string {
 	return s
 		.toLowerCase()
 		.replace(/(^|[\s\-/&(])([a-z])/g, (_, sep, ch) => `${sep}${ch.toUpperCase()}`)
-		.replace(/\b(Nyc|Bbq|Cvs|Atm|Usa|Dba|Ii|Iii)\b/g, (m) => m.toUpperCase());
+		.replace(/\b(Nyc|Bbq|Cvs|Atm|Usa|Dba|Pj|Ii|Iii)\b/g, (m) => m.toUpperCase());
 }
 
 function cleanAddr(raw: string): string {
@@ -117,7 +117,7 @@ async function fetchObjectSafe<T>(url: string, timeoutMs = 5500): Promise<T | nu
 }
 
 const dossierCache = new PersistentCache<BuildingDossier>(
-	'building-dossier-v6',
+	'building-dossier-v7',
 	1000 * 60 * 60 * 24, // fresh 24h
 	2000,
 	1000 * 60 * 60 * 24 * 30 // SWR up to 30d
@@ -147,7 +147,7 @@ export const GET: RequestHandler = async ({ url, platform }) => {
 	).trim();
 
 	const aliasKey = aliasBbls.length > 0 ? `:a=${aliasBbls.join(',')}` : '';
-	const cacheKey = `v6:${rawBbl}${aliasKey}:${apiKey ? 'sv' : 'nosv'}`;
+	const cacheKey = `v7:${rawBbl}${aliasKey}:${apiKey ? 'sv' : 'nosv'}`;
 	const cached = dossierCache.getWithStatus(cacheKey);
 	if (cached) {
 		if (cached.stale) {
@@ -729,10 +729,12 @@ async function fetchFreshDossier(
 	// Guard against PLUTO clerk address typos on condo billing lots (e.g. 1007297508 says "424 West 23rd St"
 	// on Block 729 while sibling lot 1007290163 & all DOF filings say "424 West 33 Street"!)
 	let bestAddr = plutoAddr;
-	if (isCondoBilling && plutoAddr) {
-		const candAddr = cleanAddr(
-			siblingPlutoRows[0]?.address || dofHistory[0]?.units[0]?.address || ''
-		);
+	if (isCondoBilling && plutoAddr && plutoHouseNum) {
+		const sameNumSibling = siblingPlutoRows.find((r) => extractHouseNum(r.address || '') === plutoHouseNum);
+		const sameNumDof = dofHistory
+			.flatMap((y) => y.units)
+			.find((u) => extractHouseNum(u.address || '') === plutoHouseNum);
+		const candAddr = cleanAddr(sameNumSibling?.address || sameNumDof?.address || '');
 		if (candAddr && extractHouseNum(candAddr) === plutoHouseNum) {
 			const candUpper = candAddr.toUpperCase();
 			const plutoMatchesCand = plutoStreetWords.some((w) => candUpper.includes(w));
@@ -744,7 +746,11 @@ async function fetchFreshDossier(
 					.split(/\s+/)
 					.filter((w) => w.length >= 2 && !['ST', 'STREET', 'AVE', 'AVENUE', 'WEST', 'EAST', 'NORTH', 'SOUTH', 'W', 'E', 'N', 'S'].includes(w));
 				const otherBlockAddrs = plutoRows
-					.filter((r) => normBbl(r.bbl) !== rawBbl)
+					.filter(
+						(r) =>
+							normBbl(r.bbl) !== rawBbl &&
+							extractHouseNum(r.address || '') !== plutoHouseNum
+					)
 					.map((r) => (r.address || '').toUpperCase());
 				const candHits = otherBlockAddrs.filter((a) => candWords.some((w) => a.includes(w))).length;
 				const plutoHits = otherBlockAddrs.filter((a) => plutoStreetWords.some((w) => a.includes(w))).length;
