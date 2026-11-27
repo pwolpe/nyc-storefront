@@ -29,6 +29,30 @@ export const load: PageLoad = async ({ params, fetch }) => {
 	const cachedLots = browser ? blockLotsClientCache.get(lotsKey) : null;
 	const cachedDossier = browser ? buildingCache.get(params.bbl) : null;
 
+	// If we came from the Block page, forward any linked storefront/pre-condo BBLs attached to this lot
+	const findAliases = (lots: BlockLotsResponse | null): string[] => {
+		if (!lots) return [];
+		const all = [...(lots.sideA || []), ...(lots.sideB || [])];
+		const lot = all.find(
+			(l) =>
+				l.bbl === params.bbl ||
+				l.storefronts.some((sf) => (sf.bbl || '').split('.')[0].trim() === params.bbl)
+		);
+		if (!lot) return [];
+		const set = new Set<string>();
+		if (/^[1-5]\d{9}$/.test(lot.bbl) && lot.bbl !== params.bbl) set.add(lot.bbl);
+		for (const sf of lot.storefronts) {
+			const sb = (sf.bbl || '').split('.')[0].trim();
+			if (/^[1-5]\d{9}$/.test(sb) && sb !== params.bbl) set.add(sb);
+		}
+		return [...set].sort().slice(0, 6);
+	};
+
+	const initialAliases = findAliases(cachedLots);
+	const buildingApiUrl =
+		`/api/building?bbl=${encodeURIComponent(params.bbl)}` +
+		(initialAliases.length > 0 ? `&alias=${encodeURIComponent(initialAliases.join(','))}` : '');
+
 	const [res, lotsRes, dossierRes] = await Promise.all([
 		fetch(`/data/clusters/${params.id}.json`),
 		cachedLots
@@ -36,9 +60,7 @@ export const load: PageLoad = async ({ params, fetch }) => {
 			: fetch(
 					`/api/block-lots?cluster=${encodeURIComponent(params.id)}&segment=${encodeURIComponent(params.segmentId)}`
 				).catch(() => null),
-		cachedDossier
-			? Promise.resolve(null)
-			: fetch(`/api/building?bbl=${encodeURIComponent(params.bbl)}`).catch(() => null)
+		cachedDossier ? Promise.resolve(null) : fetch(buildingApiUrl).catch(() => null)
 	]);
 
 	if (!res.ok) throw error(404, `Cluster "${params.id}" not found`);

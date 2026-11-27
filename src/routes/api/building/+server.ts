@@ -117,7 +117,7 @@ async function fetchObjectSafe<T>(url: string, timeoutMs = 5500): Promise<T | nu
 }
 
 const dossierCache = new PersistentCache<BuildingDossier>(
-	'building-dossier-v5',
+	'building-dossier-v6',
 	1000 * 60 * 60 * 24, // fresh 24h
 	2000,
 	1000 * 60 * 60 * 24 * 30 // SWR up to 30d
@@ -129,17 +129,29 @@ export const GET: RequestHandler = async ({ url, platform }) => {
 		throw error(400, 'Invalid 10-digit NYC BBL');
 	}
 
+	const aliasBbls = [
+		...new Set(
+			(url.searchParams.get('alias') || '')
+				.split(',')
+				.map((s) => s.split('.')[0].trim())
+				.filter((s) => /^[1-5]\d{9}$/.test(s) && s !== rawBbl)
+		)
+	]
+		.sort()
+		.slice(0, 6);
+
 	const apiKey = (
 		env.GOOGLE_MAPS_API_KEY ||
 		(platform?.env as Record<string, string> | undefined)?.GOOGLE_MAPS_API_KEY ||
 		''
 	).trim();
 
-	const cacheKey = `v5:${rawBbl}:${apiKey ? 'sv' : 'nosv'}`;
+	const aliasKey = aliasBbls.length > 0 ? `:a=${aliasBbls.join(',')}` : '';
+	const cacheKey = `v6:${rawBbl}${aliasKey}:${apiKey ? 'sv' : 'nosv'}`;
 	const cached = dossierCache.getWithStatus(cacheKey);
 	if (cached) {
 		if (cached.stale) {
-			dossierCache.revalidate(cacheKey, () => fetchFreshDossier(rawBbl, apiKey));
+			dossierCache.revalidate(cacheKey, () => fetchFreshDossier(rawBbl, aliasBbls, apiKey));
 		}
 		return json(cached.data, {
 			headers: {
@@ -148,7 +160,7 @@ export const GET: RequestHandler = async ({ url, platform }) => {
 		});
 	}
 
-	const dossier = await fetchFreshDossier(rawBbl, apiKey);
+	const dossier = await fetchFreshDossier(rawBbl, aliasBbls, apiKey);
 	if (dossier && (dossier.dofHistory.length > 0 || dossier.yearBuilt !== null)) {
 		dossierCache.set(cacheKey, dossier);
 	}
@@ -160,8 +172,11 @@ export const GET: RequestHandler = async ({ url, platform }) => {
 	});
 };
 
-async function fetchFreshDossier(rawBbl: string, apiKey: string): Promise<BuildingDossier> {
-
+async function fetchFreshDossier(
+	rawBbl: string,
+	aliasBbls: string[],
+	apiKey: string
+): Promise<BuildingDossier> {
 	const boroCode = rawBbl[0];
 	const blockNum = parseInt(rawBbl.slice(1, 6), 10);
 	const lotNum = parseInt(rawBbl.slice(6, 10), 10);
@@ -171,56 +186,74 @@ async function fetchFreshDossier(rawBbl: string, apiKey: string): Promise<Buildi
 	const boroUpper = BORO_NAMES[boroCode] || 'MANHATTAN';
 	const boroDisplay = BORO_DISPLAY[boroCode] || 'New York';
 	const isCondoBilling = lotNum >= 7500;
+	const explicitBbls = [rawBbl, ...aliasBbls];
+	const explicitBblIn = explicitBbls.map((b) => `'${b}'`).join(',');
 
 	// 1. PLUTO full property profile
+	// For condo billing lots (7500+), fetch the small tax block (~5-50 lots) so we can automatically link
+	// pre-condo lots (same owner / same building, e.g. 1007297508 <-> 1007290163 at 424 W 33rd St) in 0 extra round trips!
 	const plutoSelect =
 		'bbl,address,ownername,zipcode,zonedist1,bldgclass,landuse,yearbuilt,numfloors,lotfront,lotdepth,bldgarea,retailarea,resarea,unitsres,unitstotal,assesstot,assessland,council,latitude,longitude';
-	const plutoUrl = `https://data.cityofnewyork.us/resource/64uk-42ks.json?$select=${encodeURIComponent(plutoSelect)}&$where=${encodeURIComponent(`borocode=${boroCode} AND block=${blockNum} AND lot=${lotNum}`)}&$limit=1`;
+	const plutoWhere = isCondoBilling
+		? `borocode=${boroCode} AND block=${blockNum}`
+		: `borocode=${boroCode} AND block=${blockNum} AND lot=${lotNum}`;
+	const plutoUrl = `https://data.cityofnewyork.us/resource/64uk-42ks.json?$select=${encodeURIComponent(plutoSelect)}&$where=${encodeURIComponent(plutoWhere)}&$limit=${isCondoBilling ? 80 : 1}`;
 
 	// 2. Multi-year NYC DOF Storefront Registry
-	// For condo billing lots (7500+), DOF files under condo unit BBLs on the same block (e.g. 1008661202/1203 for 1008667501)
+	// For condo billing lots (7500+), DOF often files under condo unit BBLs (1xxx) OR pre-condo BBLs on the same tax block
 	const dofWhere = isCondoBilling
 		? `borough_block_lot like '${boroCode}${blockPad5}%'`
-		: `borough_block_lot='${rawBbl}'`;
+		: explicitBbls.length > 1
+			? `borough_block_lot in (${explicitBblIn})`
+			: `borough_block_lot='${rawBbl}'`;
 	const dofUrl = `https://data.cityofnewyork.us/resource/92iy-9c3n.json?$where=${encodeURIComponent(dofWhere)}&$order=reporting_year%20DESC&$limit=${isCondoBilling ? 350 : 120}`;
 
 	// 3. NYC OATH Hearings & Enforcement
 	const oathUrl = `https://data.cityofnewyork.us/resource/jz4z-kudi.json?$select=${encodeURIComponent('violation_date,issuing_agency,respondent_last_name,violation_location_house,violation_location_street_name,charge_1_code_description,violation_details,hearing_status,total_violation_amount')}&$where=${encodeURIComponent(`violation_location_borough='${boroUpper}' AND violation_location_block_no='${blockPad5}' AND violation_location_lot_no='${lotPad4}'`)}&$order=violation_date%20DESC&$limit=20`;
 
 	// 4. NYC 311 Service Requests
-	const c311Url = `https://data.cityofnewyork.us/resource/erm2-nwe9.json?$select=${encodeURIComponent('created_date,incident_address,complaint_type,descriptor,status')}&$where=${encodeURIComponent(`bbl='${rawBbl}' AND created_date >= '2023-01-01'`)}&$order=created_date%20DESC&$limit=20`;
+	const c311Where =
+		explicitBbls.length > 1
+			? `bbl in (${explicitBblIn}) AND created_date >= '2023-01-01'`
+			: `bbl='${rawBbl}' AND created_date >= '2023-01-01'`;
+	const c311Url = `https://data.cityofnewyork.us/resource/erm2-nwe9.json?$select=${encodeURIComponent('created_date,incident_address,complaint_type,descriptor,status')}&$where=${encodeURIComponent(c311Where)}&$order=created_date%20DESC&$limit=20`;
 
 	// 5. NYC DOB NOW + Legacy DOB Permits
 	const dobNowUrl = `https://data.cityofnewyork.us/resource/rbx6-tga4.json?$select=${encodeURIComponent('issued_date,job_type,work_type,permit_status,job_description,owner_business_name')}&$where=${encodeURIComponent(`borough='${boroUpper}' AND block in ('${blockNum}','${blockPad5}') AND lot in ('${lotNum}','${lotPad4}','${lotPad5}')`)}&$order=issued_date%20DESC&$limit=14`;
 
 	const dobLegacyUrl = `https://data.cityofnewyork.us/resource/ipu4-2q9a.json?$select=${encodeURIComponent('issuance_date,job_type,work_type,permit_status,permit_subtype,owner_s_business_name')}&$where=${encodeURIComponent(`borough='${boroUpper}' AND block='${blockPad5}' AND lot='${lotPad5}'`)}&$order=issuance_date%20DESC&$limit=12`;
 
-	// 6. NYC DOHMH Restaurant Inspections (full tenant history!)
+	// 6. NYC DOHMH Restaurant Inspections (for condo billing lots, pull block-wide & filter strictly to matched sibling/unit BBLs!)
+	const tenantWhere = isCondoBilling
+		? `bbl like '${boroCode}${blockPad5}%'`
+		: explicitBbls.length > 1
+			? `bbl in (${explicitBblIn})`
+			: `bbl='${rawBbl}'`;
 	const dohmhUrl =
 		'https://data.cityofnewyork.us/resource/43nn-pn8j.json?' +
 		new URLSearchParams({
-			$select: 'dba,cuisine_description,min(inspection_date) as first_dt,max(inspection_date) as last_dt,count(*) as cnt',
-			$where: `bbl='${rawBbl}'`,
-			$group: 'dba,cuisine_description',
-			$limit: '30'
+			$select: 'bbl,dba,cuisine_description,min(inspection_date) as first_dt,max(inspection_date) as last_dt,count(*) as cnt',
+			$where: tenantWhere,
+			$group: 'bbl,dba,cuisine_description',
+			$limit: isCondoBilling ? '120' : '30'
 		}).toString();
 
 	// 7. NYC DCWP Legally Operating Businesses (non-food retail, salons, vintage, garages, smoke shops)
 	const dcwpUrl =
 		'https://data.cityofnewyork.us/resource/w7w3-xahh.json?' +
 		new URLSearchParams({
-			$select: 'business_name,business_category,license_status,license_creation_date,lic_expir_dd',
-			$where: `bbl='${rawBbl}'`,
-			$limit: '30'
+			$select: 'bbl,business_name,business_category,license_status,license_creation_date,lic_expir_dd',
+			$where: tenantWhere,
+			$limit: isCondoBilling ? '120' : '30'
 		}).toString();
 
 	// 7b. NYC Open Restaurants Archive (2020–2023) — preserves closed restaurants purged by DOHMH
 	const openRestUrl =
 		'https://data.cityofnewyork.us/resource/pitm-atqc.json?' +
 		new URLSearchParams({
-			$select: 'restaurant_name,doing_business_as_dba,time_of_submission',
-			$where: `bbl='${rawBbl}'`,
-			$limit: '20'
+			$select: 'bbl,restaurant_name,doing_business_as_dba,time_of_submission',
+			$where: tenantWhere,
+			$limit: isCondoBilling ? '80' : '20'
 		}).toString();
 
 	// 7c. Historical OATH grouped respondents — recovers named former storefront businesses at this lot
@@ -275,9 +308,16 @@ async function fetchFreshDossier(rawBbl: string, apiKey: string): Promise<Buildi
 		fetchObjectSafe<ParcelGeo>(parcelUrl, 3500)
 	]);
 
-	const pluto = plutoRows[0] || {};
+	const normBbl = (v: string | undefined) => (v || '').split('.')[0].trim();
+	const pluto =
+		plutoRows.find((r) => normBbl(r.bbl) === rawBbl) ||
+		plutoRows.find((r) => parseInt(normBbl(r.bbl).slice(6, 10), 10) === lotNum) ||
+		plutoRows[0] ||
+		{};
 	const plutoAddr = cleanAddr(pluto.address || '');
 	const plutoHouseNum = extractHouseNum(pluto.address || '');
+	const plutoLat = parseFloat(pluto.latitude || '');
+	const plutoLng = parseFloat(pluto.longitude || '');
 	const plutoStreetWords = (pluto.address || '')
 		.toUpperCase()
 		.replace(/^\d+[A-Z]?(?:-\d+[A-Z]?)?\s+/i, '')
@@ -285,11 +325,46 @@ async function fetchFreshDossier(rawBbl: string, apiKey: string): Promise<Buildi
 		.split(/\s+/)
 		.filter((w) => w.length >= 2 && !['ST', 'STREET', 'AVE', 'AVENUE', 'WEST', 'EAST', 'NORTH', 'SOUTH', 'W', 'E', 'N', 'S'].includes(w));
 
-	// Filter condo block-level DOF rows to THIS building's condo unit BBLs (exact BBL first, else matching house number + street)
-	let dofRows = rawDofRows.filter((r) => (r.borough_block_lot || r.bbl || '').split('.')[0].trim() === rawBbl);
+	// Discover sibling / pre-condo BBLs for condo billing lots (e.g. 1007297508 <-> 1007290163 at 424 W 33rd St)
+	const GENERIC_OWNER_RE =
+		/^(UNAVAILABLE\s+OWNER|CONDOMINIUM|CONDO\b|BOARD\s+OF\s+MANAGERS|NYC\b|CITY\s+OF\s+NEW\s+YORK|DEPT\s+OF|OWNER\b)/i;
+	const normOwner = (pluto.ownername || '').trim().toUpperCase().replace(/\s+/g, ' ');
+	const hasSpecificOwner = normOwner.length >= 6 && !GENERIC_OWNER_RE.test(normOwner);
+
+	const siblingPlutoRows: Record<string, string>[] = [];
+	const baseMatchedBbls = new Set<string>([rawBbl, ...aliasBbls]);
+	if (isCondoBilling && plutoRows.length > 1) {
+		for (const r of plutoRows) {
+			const rBbl = normBbl(r.bbl);
+			if (!/^[1-5]\d{9}$/.test(rBbl) || rBbl === rawBbl) continue;
+			const rLot = parseInt(rBbl.slice(6, 10), 10);
+			if (!Number.isFinite(rLot) || rLot >= 7500) continue; // never merge two distinct condo towers
+			const rOwner = (r.ownername || '').trim().toUpperCase().replace(/\s+/g, ' ');
+			const rNum = extractHouseNum(r.address || '');
+			const rLat = parseFloat(r.latitude || '');
+			const rLng = parseFloat(r.longitude || '');
+			const closeCoords =
+				Number.isFinite(plutoLat) &&
+				Number.isFinite(plutoLng) &&
+				Number.isFinite(rLat) &&
+				Number.isFinite(rLng) &&
+				Math.abs(plutoLat - rLat) < 0.0005 &&
+				Math.abs(plutoLng - rLng) < 0.0006;
+
+			const sameOwnerMatch = hasSpecificOwner && rOwner === normOwner;
+			const sameHouseCloseMatch = Boolean(plutoHouseNum && rNum && rNum === plutoHouseNum && closeCoords);
+			if (sameOwnerMatch || sameHouseCloseMatch) {
+				baseMatchedBbls.add(rBbl);
+				siblingPlutoRows.push(r);
+			}
+		}
+	}
+
+	// Filter condo block-level DOF rows to THIS building's BBL, explicit alias BBLs, pre-condo sibling BBLs, or condo unit BBLs
+	let dofRows = rawDofRows.filter((r) => baseMatchedBbls.has(normBbl(r.borough_block_lot || r.bbl)));
 	if (dofRows.length === 0 && isCondoBilling && rawDofRows.length > 0) {
 		dofRows = rawDofRows.filter((r) => {
-			const rowBbl = (r.borough_block_lot || r.bbl || '').split('.')[0].trim();
+			const rowBbl = normBbl(r.borough_block_lot || r.bbl);
 			const rowLot = parseInt(rowBbl.slice(6, 10), 10);
 			if (!Number.isFinite(rowLot) || rowLot < 1000) return false;
 			const rowAddr = String(
@@ -303,6 +378,23 @@ async function fetchFreshDossier(rawBbl: string, apiKey: string): Promise<Buildi
 			return false;
 		});
 	}
+
+	// Build final matched BBL set (billing lot + aliases + pre-condo siblings + matched DOF condo units)
+	const allMatchedBbls = new Set<string>(baseMatchedBbls);
+	for (const r of dofRows) {
+		const rb = normBbl(r.borough_block_lot || r.bbl);
+		if (/^[1-5]\d{9}$/.test(rb)) allMatchedBbls.add(rb);
+	}
+
+	const filteredDohmhRows = isCondoBilling
+		? dohmhRows.filter((r) => allMatchedBbls.has(normBbl(r.bbl)))
+		: dohmhRows;
+	const filteredDcwpRows = isCondoBilling
+		? dcwpRows.filter((r) => allMatchedBbls.has(normBbl(r.bbl)))
+		: dcwpRows;
+	const filteredOpenRestRows = isCondoBilling
+		? openRestRows.filter((r) => allMatchedBbls.has(normBbl(r.bbl)))
+		: openRestRows;
 
 	// Deduplicate Feb 15 supplemental filings whenever the same (BBL, reporting_year) filed its June Annual RPIE
 	dofRows = dedupeDofRows(dofRows);
@@ -404,7 +496,7 @@ async function fetchFreshDossier(rawBbl: string, apiKey: string): Promise<Buildi
 		}
 	};
 
-	for (const row of dohmhRows) {
+	for (const row of filteredDohmhRows) {
 		if (!row.dba) continue;
 		const name = cleanBusinessName(row.dba);
 		const rawFirst = (row.first_dt || '').slice(0, 10);
@@ -429,7 +521,7 @@ async function fetchFreshDossier(rawBbl: string, apiKey: string): Promise<Buildi
 		});
 	}
 
-	for (const row of dcwpRows) {
+	for (const row of filteredDcwpRows) {
 		if (!row.business_name) continue;
 		const name = cleanBusinessName(row.business_name);
 		const st = (row.license_status || '').toLowerCase();
@@ -446,7 +538,7 @@ async function fetchFreshDossier(rawBbl: string, apiKey: string): Promise<Buildi
 	}
 
 	// Open Restaurants Archive (2020-2023): recovers closed restaurants deleted from active DOHMH roster
-	for (const row of openRestRows) {
+	for (const row of filteredOpenRestRows) {
 		const rawName = row.doing_business_as_dba || row.restaurant_name || '';
 		if (!rawName) continue;
 		const name = cleanBusinessName(rawName);
@@ -631,15 +723,44 @@ async function fetchFreshDossier(rawBbl: string, apiKey: string): Promise<Buildi
 		return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
 	};
 
-	const lat = Number.isFinite(parseFloat(pluto.latitude || '')) ? parseFloat(pluto.latitude) : null;
-	const lng = Number.isFinite(parseFloat(pluto.longitude || '')) ? parseFloat(pluto.longitude) : null;
-	const finalAddress = plutoAddr || dofHistory[0]?.units[0]?.address || `BBL ${rawBbl}`;
+	const lat = Number.isFinite(plutoLat) ? plutoLat : null;
+	const lng = Number.isFinite(plutoLng) ? plutoLng : null;
+
+	// Guard against PLUTO clerk address typos on condo billing lots (e.g. 1007297508 says "424 West 23rd St"
+	// on Block 729 while sibling lot 1007290163 & all DOF filings say "424 West 33 Street"!)
+	let bestAddr = plutoAddr;
+	if (isCondoBilling && plutoAddr) {
+		const candAddr = cleanAddr(
+			siblingPlutoRows[0]?.address || dofHistory[0]?.units[0]?.address || ''
+		);
+		if (candAddr && extractHouseNum(candAddr) === plutoHouseNum) {
+			const candUpper = candAddr.toUpperCase();
+			const plutoMatchesCand = plutoStreetWords.some((w) => candUpper.includes(w));
+			if (!plutoMatchesCand) {
+				// Confirm other lots on this tax block use candAddr's street (not plutoAddr's typo street)
+				const candWords = candUpper
+					.replace(/^\d+[A-Z]?(?:-\d+[A-Z]?)?\s+/i, '')
+					.replace(/[^A-Z0-9\s]/g, ' ')
+					.split(/\s+/)
+					.filter((w) => w.length >= 2 && !['ST', 'STREET', 'AVE', 'AVENUE', 'WEST', 'EAST', 'NORTH', 'SOUTH', 'W', 'E', 'N', 'S'].includes(w));
+				const otherBlockAddrs = plutoRows
+					.filter((r) => normBbl(r.bbl) !== rawBbl)
+					.map((r) => (r.address || '').toUpperCase());
+				const candHits = otherBlockAddrs.filter((a) => candWords.some((w) => a.includes(w))).length;
+				const plutoHits = otherBlockAddrs.filter((a) => plutoStreetWords.some((w) => a.includes(w))).length;
+				if (candHits > plutoHits) {
+					bestAddr = candAddr;
+				}
+			}
+		}
+	}
+	const finalAddress = bestAddr || dofHistory[0]?.units[0]?.address || `BBL ${rawBbl}`;
 
 	// Optional fast Google Street View metadata check (~120ms) when key is configured
 	let streetViewAvailable = false;
 	let streetViewDate: string | null = null;
 	if (apiKey && (finalAddress || (lat && lng))) {
-		const loc = plutoAddr ? `${plutoAddr}, ${boroDisplay}, NY` : `${lat},${lng}`;
+		const loc = finalAddress && !finalAddress.startsWith('BBL ') ? `${finalAddress}, ${boroDisplay}, NY` : `${lat},${lng}`;
 		const metaUrl =
 			'https://maps.googleapis.com/maps/api/streetview/metadata?' +
 			new URLSearchParams({ location: loc, source: 'outdoor', key: apiKey }).toString();

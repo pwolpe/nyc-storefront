@@ -80,11 +80,23 @@ export const fieldNoteClientCache = new ClientCache<CachedFieldNote>(1000 * 60 *
 export const visionAuditClientCache = new ClientCache<StreetViewAuditResult>(1000 * 60 * 30, 120);
 export const clusterBriefClientCache = new ClientCache<CachedClusterBrief>(1000 * 60 * 30, 80);
 
-export function warmBuilding(bbl: string): void {
+export function warmBuilding(bbl: string, aliases?: string[]): void {
 	const clean = (bbl || '').split('.')[0].trim();
 	if (!/^[1-5]\d{9}$/.test(clean) || buildingCache.get(clean)) return;
+	const cleanAliases = [
+		...new Set(
+			(aliases || [])
+				.map((s) => (s || '').split('.')[0].trim())
+				.filter((s) => /^[1-5]\d{9}$/.test(s) && s !== clean)
+		)
+	]
+		.sort()
+		.slice(0, 6);
+	const url =
+		`/api/building?bbl=${encodeURIComponent(clean)}` +
+		(cleanAliases.length > 0 ? `&alias=${encodeURIComponent(cleanAliases.join(','))}` : '');
 	void buildingCache.getOrFetch(clean, async () => {
-		const res = await fetch(`/api/building?bbl=${encodeURIComponent(clean)}`, {
+		const res = await fetch(url, {
 			priority: 'low' as RequestPriority
 		});
 		if (!res.ok) return null;

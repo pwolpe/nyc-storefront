@@ -156,12 +156,16 @@
 					if (target) warmBlock(target.clusterId, target.segId);
 				}
 			}
-			const featuredBbls = lots
+			const featuredLots = lots
 				.filter((l) => /^[1-5]\d{9}$/.test(l.bbl) && (l.vacantCount > 0 || l.storefronts.length > 0))
 				.sort((a, b) => b.vacantCount - a.vacantCount || b.storefronts.length - a.storefronts.length)
-				.slice(0, 4)
-				.map((l) => l.bbl);
-			for (const b of featuredBbls) warmBuilding(b);
+				.slice(0, 4);
+			for (const l of featuredLots) {
+				warmBuilding(
+					l.bbl,
+					l.storefronts.map((sf) => sf.bbl).filter((b): b is string => Boolean(b))
+				);
+			}
 		}, 550);
 		return () => clearTimeout(timer);
 	});
