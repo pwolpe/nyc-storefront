@@ -35,7 +35,7 @@
 	const cityRate = $derived(data.clustersData.meta.citywideRate);
 
 	let dossier = $state<BuildingDossier | null>(null);
-	let loading = $state(true);
+	let loading = $state(false);
 	let loadError = $state('');
 
 	type EvidenceTab = 'tenants' | 'dof' | 'permits' | 'oath' | 'c311';
@@ -350,8 +350,11 @@
 			else activeTab = 'c311';
 		};
 
-		const cached = buildingCache.get(targetBbl);
+		const cached =
+			(data.initialDossier?.bbl === targetBbl ? data.initialDossier : null) ??
+			buildingCache.get(targetBbl);
 		if (cached) {
+			buildingCache.set(targetBbl, cached);
 			applyDossier(cached);
 			loading = false;
 			return;

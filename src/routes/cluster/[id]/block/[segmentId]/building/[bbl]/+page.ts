@@ -1,6 +1,8 @@
 import { error } from '@sveltejs/kit';
+import { browser } from '$app/environment';
+import { blockLotsClientCache, buildingCache } from '$lib/clientCache';
 import type { PageLoad } from './$types';
-import type { BlockLot, BlockLotsResponse, ClusterShard } from '$lib/types';
+import type { BlockLot, BlockLotsResponse, BuildingDossier, ClusterShard } from '$lib/types';
 
 export interface DoorNeighbor {
 	bbl: string;
@@ -23,11 +25,20 @@ export const load: PageLoad = async ({ params, fetch }) => {
 		throw error(400, `Invalid NYC BBL "${params.bbl}"`);
 	}
 
-	const [res, lotsRes] = await Promise.all([
+	const lotsKey = `${params.id}:${params.segmentId}`;
+	const cachedLots = browser ? blockLotsClientCache.get(lotsKey) : null;
+	const cachedDossier = browser ? buildingCache.get(params.bbl) : null;
+
+	const [res, lotsRes, dossierRes] = await Promise.all([
 		fetch(`/data/clusters/${params.id}.json`),
-		fetch(
-			`/api/block-lots?cluster=${encodeURIComponent(params.id)}&segment=${encodeURIComponent(params.segmentId)}&v=7`
-		).catch(() => null)
+		cachedLots
+			? Promise.resolve(null)
+			: fetch(
+					`/api/block-lots?cluster=${encodeURIComponent(params.id)}&segment=${encodeURIComponent(params.segmentId)}`
+				).catch(() => null),
+		cachedDossier
+			? Promise.resolve(null)
+			: fetch(`/api/building?bbl=${encodeURIComponent(params.bbl)}`).catch(() => null)
 	]);
 
 	if (!res.ok) throw error(404, `Cluster "${params.id}" not found`);
@@ -38,13 +49,35 @@ export const load: PageLoad = async ({ params, fetch }) => {
 		throw error(404, `Block "${params.segmentId}" not found in cluster "${params.id}"`);
 	}
 
+	let initialDossier: BuildingDossier | null = cachedDossier;
+	if (!initialDossier && dossierRes && dossierRes.ok) {
+		try {
+			const parsed = (await dossierRes.json()) as BuildingDossier;
+			if (parsed?.bbl === params.bbl) {
+				initialDossier = parsed;
+				if (browser) buildingCache.set(params.bbl, parsed);
+			}
+		} catch {
+			// Fall back to client fetch if needed
+		}
+	}
+
 	let prevBuilding: DoorNeighbor | null = null;
 	let nextBuilding: DoorNeighbor | null = null;
 	let sidewalkLabel: string | null = null;
 
-	if (lotsRes && lotsRes.ok) {
+	let lotsData: BlockLotsResponse | null = cachedLots;
+	if (!lotsData && lotsRes && lotsRes.ok) {
 		try {
-			const lotsData: BlockLotsResponse = await lotsRes.json();
+			lotsData = (await lotsRes.json()) as BlockLotsResponse;
+			if (browser && lotsData) blockLotsClientCache.set(lotsKey, lotsData);
+		} catch {
+			lotsData = null;
+		}
+	}
+
+	if (lotsData) {
+		try {
 			const sides = [lotsData.sideA || [], lotsData.sideB || []];
 			for (const side of sides) {
 				// Find this building by exact BBL or condo unit storefront BBL
@@ -92,6 +125,7 @@ export const load: PageLoad = async ({ params, fetch }) => {
 		bbl: params.bbl,
 		prevBuilding,
 		nextBuilding,
-		sidewalkLabel
+		sidewalkLabel,
+		initialDossier
 	};
 };
