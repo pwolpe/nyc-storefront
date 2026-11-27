@@ -10,7 +10,7 @@ import {
 	getOpenRouterKey
 } from '$lib/server/openrouter';
 
-const auditCache = new PersistentCache<StreetViewAuditResult>('ai-sv-audit-v1', 1000 * 60 * 60 * 72, 1200);
+const auditCache = new PersistentCache<StreetViewAuditResult>('ai-sv-audit-v2', 1000 * 60 * 60 * 72, 1200);
 const EDGE_TTL_SEC = 60 * 60 * 72; // 72 hours
 
 function getEdgeCache(): Cache | null {
@@ -59,7 +59,9 @@ export const POST: RequestHandler = async ({ request, platform }) => {
 		lat?: number | null;
 		lng?: number | null;
 		captureDate?: string | null;
+		dofYear?: number | null;
 		dofStatus?: 'vacant' | 'open' | 'mixed' | 'none';
+		captureYearDofStatus?: 'vacant' | 'open' | 'mixed' | 'none';
 		dofVacant?: number;
 		dofTotal?: number;
 		knownTenants?: string[];
@@ -102,7 +104,7 @@ export const POST: RequestHandler = async ({ request, platform }) => {
 
 	// 2. Edge Cache if present
 	const edgeCache = getEdgeCache();
-	const edgeKey = new Request(`https://cache.nyc-storefront.internal/sv-audit/v1/${encodeURIComponent(bbl)}`);
+	const edgeKey = new Request(`https://cache.nyc-storefront.internal/sv-audit/v2/${encodeURIComponent(bbl)}`);
 	if (edgeCache) {
 		try {
 			const hit = await edgeCache.match(edgeKey);
@@ -167,13 +169,15 @@ export const POST: RequestHandler = async ({ request, platform }) => {
 		const imgBase64 = arrayBufferToBase64(await svRes.arrayBuffer());
 		const dataUrl = `data:${contentType};base64,${imgBase64}`;
 
+		const dofYr = payload.dofYear || 2025;
+		const captureYr = payload.captureDate ? parseInt(payload.captureDate.slice(0, 4), 10) || null : null;
 		const dofDesc =
 			payload.dofStatus === 'vacant'
-				? `NYC DOF 2025 filing reports VACANT (${payload.dofVacant}/${payload.dofTotal} empty)`
+				? `NYC DOF ${dofYr} filing reports VACANT (${payload.dofVacant}/${payload.dofTotal} empty)`
 				: payload.dofStatus === 'open'
-					? `NYC DOF 2025 filing reports OPEN (0/${payload.dofTotal} empty)`
+					? `NYC DOF ${dofYr} filing reports OPEN (0/${payload.dofTotal} empty)`
 					: payload.dofStatus === 'mixed'
-						? `NYC DOF 2025 filing reports MIXED (${payload.dofVacant}/${payload.dofTotal} empty)`
+						? `NYC DOF ${dofYr} filing reports MIXED (${payload.dofVacant}/${payload.dofTotal} empty — has both open and vacant bays)`
 						: 'No DOF commercial filing on record';
 
 		const system = `You are an NYC urban-planning photo auditor inspecting a Google Street View photo of a building's ground-floor storefront(s).
@@ -184,13 +188,14 @@ Return STRICT JSON:
   "signageText": "Exact legible business name(s) on awning/signage, or null if none clearly readable",
   "signals": ["Up to 3 short 2-3 word visual cues like 'Active signage', 'Roll-down gate', 'Papered windows', 'For Lease banner', 'Sidewalk shed', 'Empty interior'"],
   "summary": "1 crisp factual sentence (max 24 words) stating what the camera sees on the ground floor.",
-  "discrepancyFlag": true or false (TRUE ONLY if the photo clearly contradicts the DOF tax filing — e.g. DOF says OPEN but photo clearly shows papered windows / For Lease / gutted interior, OR DOF says VACANT but photo clearly shows a brightly operating open business with customers/fresh signage. Be conservative: a closed roll-down gate at early morning or scaffolding alone is NOT a definite contradiction!),
-  "discrepancyHeadline": "Short 6-11 word headline if discrepancyFlag is true, otherwise null"
+  "discrepancyFlag": true or false (BE VERY CONSERVATIVE. Set true ONLY for an unmistakable contradiction: e.g. DOF reports ALL OPEN but photo clearly shows papered windows / For Lease / gutted interior, OR DOF reports ALL VACANT but photo clearly shows a brightly lit, unmistakably active open business with merchandise, patrons, or open doors. Set FALSE for: mixed buildings, residual/old awnings over dark windows, closed roll-down gates, scaffolding/sidewalk sheds, neighboring storefronts on narrow lots, or older photos taken before a recent change.),
+  "discrepancyHeadline": "Short 5-9 word neutral headline if discrepancyFlag is true, otherwise null"
 }`;
 
 		const user = `Address: ${payload.address || bbl}, ${payload.borough || 'NYC'}.
 Street View capture date: ${payload.captureDate || 'unknown'}.
 City tax record: ${dofDesc}.
+${captureYr && captureYr < dofYr && payload.captureYearDofStatus && payload.captureYearDofStatus !== 'none' ? `Historical DOF record in ${captureYr} (year photo was taken): ${payload.captureYearDofStatus.toUpperCase()}.` : ''}
 Known city-listed tenants: ${(payload.knownTenants || []).slice(0, 4).join(', ') || 'none'}.
 Inspect the ground floor of this photo and return strict JSON.`;
 
@@ -216,19 +221,34 @@ Inspect the ground floor of this photo and return strict JSON.`;
 			discrepancyHeadline?: string | null;
 		}>(ai.text);
 
+		const visualStatus = parsed?.visualStatus || 'unclear';
+		const isTrueOpposite =
+			(payload.dofStatus === 'vacant' && visualStatus === 'open') ||
+			(payload.dofStatus === 'open' && visualStatus === 'vacant');
+		// Suppress false Reality Gaps from older Street View captures that matched that year's DOF status
+		const isJustOlderPhoto =
+			captureYr !== null &&
+			captureYr < dofYr &&
+			(payload.captureYearDofStatus === visualStatus || payload.captureYearDofStatus === 'mixed');
+
+		const allowDiscrepancy =
+			Boolean(parsed?.discrepancyFlag && parsed?.discrepancyHeadline) &&
+			Boolean(payload.dofTotal && payload.dofTotal > 0) &&
+			isTrueOpposite &&
+			!isJustOlderPhoto;
+
 		const result: StreetViewAuditResult = {
 			configured: true,
 			bbl,
-			visualStatus: parsed?.visualStatus || 'unclear',
+			visualStatus,
 			signageText: parsed?.signageText?.trim() || null,
 			signals: Array.isArray(parsed?.signals)
 				? parsed.signals.map((s) => String(s).trim()).filter(Boolean).slice(0, 3)
 				: [],
 			summary: (parsed?.summary || '').trim(),
-			discrepancy:
-				parsed?.discrepancyFlag && parsed?.discrepancyHeadline
-					? { flagged: true, headline: parsed.discrepancyHeadline.trim() }
-					: null,
+			discrepancy: allowDiscrepancy
+				? { flagged: true, headline: parsed!.discrepancyHeadline!.trim() }
+				: null,
 			captureDate: payload.captureDate || null
 		};
 

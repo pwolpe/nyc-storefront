@@ -125,13 +125,18 @@
 		visionLoading = true;
 
 		const latest = d.dofHistory[0];
-		const dofStatus = !latest
-			? 'none'
-			: latest.vacant > 0 && latest.occupied === 0
-				? 'vacant'
-				: latest.vacant > 0
-					? 'mixed'
-					: 'open';
+		const statusForRec = (rec: BuildingDofYear | undefined): 'vacant' | 'open' | 'mixed' | 'none' =>
+			!rec
+				? 'none'
+				: rec.vacant > 0 && rec.occupied === 0
+					? 'vacant'
+					: rec.vacant > 0
+						? 'mixed'
+						: 'open';
+		const dofStatus = statusForRec(latest);
+		const svYear = d.streetViewDate ? parseInt(d.streetViewDate.slice(0, 4), 10) || null : null;
+		const captureYearRec = svYear ? d.dofHistory.find((y) => y.year === svYear) : undefined;
+		const captureYearDofStatus = statusForRec(captureYearRec);
 
 		fetch('/api/ai/streetview-audit', {
 			method: 'POST',
@@ -143,7 +148,9 @@
 				lat: d.lat,
 				lng: d.lng,
 				captureDate: d.streetViewDate,
+				dofYear: latest?.year ?? 2025,
 				dofStatus,
+				captureYearDofStatus,
 				dofVacant: latest?.vacant ?? 0,
 				dofTotal: latest?.total ?? 0,
 				knownTenants: d.tenants.slice(0, 4).map((t) => t.name)

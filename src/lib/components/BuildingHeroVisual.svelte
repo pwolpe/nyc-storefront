@@ -17,7 +17,6 @@
 
 	let mode = $state<ViewMode>('street');
 	let imgFailed = $state(false);
-	let auditExpanded = $state(false);
 	let mapContainer = $state<HTMLDivElement | null>(null);
 	let mapInstance: import('maplibre-gl').Map | null = null;
 	let loadedMapMode = $state<'parcel' | 'aerial' | null>(null);
@@ -27,28 +26,54 @@
 		const avail = dossier.streetViewAvailable;
 		imgFailed = false;
 		mode = avail ? 'street' : 'parcel';
-		auditExpanded = false;
 	});
 
-	// Auto-expand the sleek bottom card if Vision Audit catches a real filing discrepancy!
-	$effect(() => {
-		if (visionAudit?.discrepancy?.flagged) {
-			auditExpanded = true;
+	const shortCaptureDate = $derived.by(() => {
+		const raw = visionAudit?.captureDate || dossier.streetViewDate;
+		if (!raw) return null;
+		const [yr, mo] = raw.split('-');
+		const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+		const mIdx = parseInt(mo || '', 10) - 1;
+		return mIdx >= 0 && mIdx < 12 ? `${months[mIdx]} ${yr}` : yr;
+	});
+
+	const latestDof = $derived(dossier.dofHistory[0] ?? null);
+
+	const auditMetaBadge = $derived.by(() => {
+		if (!visionAudit) return null;
+		const dofYr = latestDof?.year ?? 2025;
+		if (visionAudit.discrepancy?.flagged) {
+			return shortCaptureDate
+				? `${shortCaptureDate} photo vs. ${dofYr} filing`
+				: `Photo vs. ${dofYr} filing`;
 		}
+		if (latestDof) {
+			const dofVacantAll = latestDof.vacant > 0 && latestDof.occupied === 0;
+			const dofOpenAll = latestDof.vacant === 0 && latestDof.occupied > 0;
+			if (
+				(dofVacantAll && visionAudit.visualStatus === 'vacant') ||
+				(dofOpenAll && visionAudit.visualStatus === 'open')
+			) {
+				return `Matches ${dofYr} filing`;
+			}
+		}
+		return shortCaptureDate ? `${shortCaptureDate} photo` : null;
 	});
 
-	const visionPillLabel = $derived.by(() => {
+	const cameraStatusLabel = $derived.by(() => {
 		if (!visionAudit) return '';
-		if (visionAudit.discrepancy?.flagged) return `⚠ Reality Gap`;
-		const statusMap: Record<StreetViewAuditResult['visualStatus'], string> = {
-			open: 'Camera: Open',
-			vacant: 'Camera: Vacant',
-			construction: 'Camera: Construction',
-			unclear: 'Camera Audit'
+		const map: Record<StreetViewAuditResult['visualStatus'], string> = {
+			open: 'Open',
+			vacant: 'Vacant',
+			construction: 'Construction',
+			unclear: 'Check'
 		};
-		const base = statusMap[visionAudit.visualStatus] || 'Camera Audit';
-		return visionAudit.signageText ? `${base} · “${visionAudit.signageText}”` : base;
+		return map[visionAudit.visualStatus] || 'Check';
 	});
+
+	const showAuditStrip = $derived(
+		Boolean(dossier.streetViewAvailable && !imgFailed && (visionLoading || visionAudit?.summary))
+	);
 
 	const svImageSrc = $derived.by(() => {
 		const params = new URLSearchParams();
@@ -204,61 +229,61 @@
 	});
 </script>
 
-<div class="hero-visual surface">
-	<!-- Sleek Mode Switcher -->
-	<div class="hv-controls">
-		<div class="hv-tabs" role="tablist" aria-label="Building visual mode">
-			{#if dossier.streetViewAvailable && !imgFailed}
-				<button
-					type="button"
-					role="tab"
-					aria-selected={mode === 'street'}
-					class="hv-tab"
-					class:active={mode === 'street'}
-					onclick={() => (mode = 'street')}
-				>
-					Street View
-				</button>
-			{/if}
+<div class="hero-visual surface" class:has-audit={showAuditStrip}>
+	<!-- Visual Viewport (100% unobstructed storefront photo / map) -->
+	<div class="hv-frame">
+		<!-- Sleek Mode Switcher -->
+		<div class="hv-controls">
+			<div class="hv-tabs" role="tablist" aria-label="Building visual mode">
+				{#if dossier.streetViewAvailable && !imgFailed}
+					<button
+						type="button"
+						role="tab"
+						aria-selected={mode === 'street'}
+						class="hv-tab"
+						class:active={mode === 'street'}
+						onclick={() => (mode = 'street')}
+					>
+						Street View
+					</button>
+				{/if}
+				{#if dossier.lat !== null && dossier.lng !== null}
+					<button
+						type="button"
+						role="tab"
+						aria-selected={mode === 'parcel'}
+						class="hv-tab"
+						class:active={mode === 'parcel'}
+						onclick={() => (mode = 'parcel')}
+					>
+						Parcel Map
+					</button>
+					<button
+						type="button"
+						role="tab"
+						aria-selected={mode === 'aerial'}
+						class="hv-tab"
+						class:active={mode === 'aerial'}
+						onclick={() => (mode = 'aerial')}
+					>
+						NYC Aerial
+					</button>
+				{/if}
+			</div>
+
 			{#if dossier.lat !== null && dossier.lng !== null}
-				<button
-					type="button"
-					role="tab"
-					aria-selected={mode === 'parcel'}
-					class="hv-tab"
-					class:active={mode === 'parcel'}
-					onclick={() => (mode = 'parcel')}
+				<a
+					href={streetViewUrl(dossier.lat, dossier.lng)}
+					target="_blank"
+					rel="noopener noreferrer"
+					class="hv-ext"
+					title="Open interactive 360° Google Street View"
 				>
-					Parcel Map
-				</button>
-				<button
-					type="button"
-					role="tab"
-					aria-selected={mode === 'aerial'}
-					class="hv-tab"
-					class:active={mode === 'aerial'}
-					onclick={() => (mode = 'aerial')}
-				>
-					NYC Aerial
-				</button>
+					360° ↗
+				</a>
 			{/if}
 		</div>
 
-		{#if dossier.lat !== null && dossier.lng !== null}
-			<a
-				href={streetViewUrl(dossier.lat, dossier.lng)}
-				target="_blank"
-				rel="noopener noreferrer"
-				class="hv-ext"
-				title="Open interactive 360° Google Street View"
-			>
-				360° ↗
-			</a>
-		{/if}
-	</div>
-
-	<!-- Visual Viewport -->
-	<div class="hv-frame">
 		{#if mode === 'street' && dossier.streetViewAvailable && !imgFailed}
 			<img
 				src={svImageSrc}
@@ -270,62 +295,6 @@
 				}}
 			/>
 			<div class="hv-caption">{svDateLabel}</div>
-
-			{#if visionLoading && !visionAudit}
-				<div class="va-pill loading" aria-live="polite">
-					<span class="va-dot"></span>
-					<span>Inspecting facade…</span>
-				</div>
-			{:else if visionAudit && visionAudit.summary}
-				{#if auditExpanded}
-					<div
-						class="va-card"
-						class:gap={Boolean(visionAudit.discrepancy?.flagged)}
-						role="region"
-						aria-label="Street View Vision Audit"
-					>
-						<div class="va-card-head">
-							<span class="va-kicker">
-								{#if visionAudit.discrepancy?.flagged}
-									⚠ REALITY GAP · {visionAudit.discrepancy.headline}
-								{:else}
-									👁 VISION AUDIT · {visionPillLabel}
-								{/if}
-							</span>
-							<button
-								type="button"
-								class="va-close"
-								onclick={() => (auditExpanded = false)}
-								title="Minimize vision note"
-								aria-label="Minimize vision note"
-							>
-								×
-							</button>
-						</div>
-						<p class="va-summary">{visionAudit.summary}</p>
-						{#if visionAudit.signals.length > 0}
-							<div class="va-tags">
-								{#each visionAudit.signals as sig}
-									<span class="va-tag">{sig}</span>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				{:else}
-					<button
-						type="button"
-						class="va-pill clickable"
-						class:gap={Boolean(visionAudit.discrepancy?.flagged)}
-						class:status-open={visionAudit.visualStatus === 'open'}
-						class:status-vacant={visionAudit.visualStatus === 'vacant'}
-						onclick={() => (auditExpanded = true)}
-						title={visionAudit.summary}
-					>
-						<span>{visionPillLabel}</span>
-						<span class="va-more">ⓘ</span>
-					</button>
-				{/if}
-			{/if}
 		{:else if dossier.lat !== null && dossier.lng !== null}
 			<div class="map-canvas" bind:this={mapContainer}></div>
 			<div class="hv-caption">
@@ -335,14 +304,84 @@
 			<div class="hv-empty">Location coordinates unavailable for this BBL</div>
 		{/if}
 	</div>
+
+	<!-- Integrated Street View Audit Footer (docked below photo, never covering the storefront) -->
+	{#if showAuditStrip}
+		{#if visionLoading && !visionAudit}
+			<div class="hv-audit loading" aria-live="polite">
+				<div class="va-head">
+					<span class="va-kicker muted">
+						<span class="va-dot pulse" aria-hidden="true"></span>
+						Street View check · Inspecting ground floor…
+					</span>
+				</div>
+				<div class="va-shimmer" aria-hidden="true">
+					<span class="va-sh w1"></span>
+					<span class="va-sh w2"></span>
+				</div>
+			</div>
+		{:else if visionAudit && visionAudit.summary}
+			<div
+				class="hv-audit"
+				class:is-gap={Boolean(visionAudit.discrepancy?.flagged)}
+				role="region"
+				aria-label="Street View Camera Check"
+			>
+				<div class="va-head">
+					<div class="va-title-group">
+						{#if visionAudit.discrepancy?.flagged}
+							<span class="va-kicker gap">Reality Gap</span>
+							<span class="va-headline">{visionAudit.discrepancy.headline}</span>
+						{:else}
+							<span class="va-dot status-{visionAudit.visualStatus}" aria-hidden="true"></span>
+							<span class="va-kicker">
+								Street View · {cameraStatusLabel}
+							</span>
+							{#if visionAudit.signageText}
+								<span class="va-signage" title={visionAudit.signageText}>“{visionAudit.signageText}”</span>
+							{/if}
+						{/if}
+					</div>
+					{#if auditMetaBadge}
+						<span class="va-meta" class:gap={Boolean(visionAudit.discrepancy?.flagged)}>
+							{auditMetaBadge}
+						</span>
+					{/if}
+				</div>
+
+				<p class="va-summary">{visionAudit.summary}</p>
+
+				{#if visionAudit.signals.length > 0}
+					<div class="va-tags">
+						{#each visionAudit.signals as sig}
+							<span class="va-tag">{sig}</span>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/if}
+	{/if}
 </div>
 
 <style>
 	.hero-visual {
 		position: relative;
 		overflow: hidden;
+		display: flex;
+		flex-direction: column;
+		background: var(--panel);
+	}
+
+	.hv-frame {
+		position: relative;
+		width: 100%;
 		height: 316px;
 		background: #eaeae5;
+		flex: none;
+	}
+
+	.hero-visual.has-audit .hv-frame {
+		height: 280px;
 	}
 
 	.hv-controls {
@@ -410,12 +449,6 @@
 		background: var(--ink);
 	}
 
-	.hv-frame {
-		position: relative;
-		width: 100%;
-		height: 100%;
-	}
-
 	.sv-img {
 		width: 100%;
 		height: 100%;
@@ -454,63 +487,117 @@
 		color: var(--muted);
 	}
 
-	.va-pill {
-		position: absolute;
-		bottom: 10px;
-		right: 10px;
-		z-index: 9;
+	/* Docked Swiss Editorial Street View Audit Strip */
+	.hv-audit {
+		padding: 10px 13px 11px;
+		border-top: 1px solid var(--rule);
+		background: var(--panel);
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+	}
+
+	.hv-audit.is-gap {
+		background: #fdf6f5;
+		box-shadow: inset 3px 0 0 var(--red);
+		padding-left: 14px;
+	}
+
+	.va-head {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.va-title-group {
+		display: inline-flex;
+		align-items: baseline;
+		flex-wrap: wrap;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.va-kicker {
 		display: inline-flex;
 		align-items: center;
-		gap: 6px;
-		max-width: 64%;
-		padding: 4px 9px;
-		border-radius: 5px;
-		border: 1px solid rgba(255, 255, 255, 0.18);
-		background: rgba(17, 17, 17, 0.8);
-		backdrop-filter: blur(8px);
-		color: #f6f6f4;
+		gap: 5px;
 		font-family: var(--font-mono);
 		font-size: 10px;
 		font-weight: 600;
-		letter-spacing: 0.02em;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--ink-soft);
+	}
+
+	.va-kicker.muted {
+		color: var(--muted);
+	}
+
+	.va-kicker.gap {
+		color: var(--red);
+		font-weight: 700;
+	}
+
+	.va-headline {
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--ink);
+		line-height: 1.3;
+	}
+
+	.va-signage {
+		font-size: 11.5px;
+		font-weight: 500;
+		color: var(--ink);
+		max-width: 190px;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 
-	.va-pill.clickable {
-		cursor: pointer;
-		transition: background 0.12s ease, transform 0.12s ease;
+	.va-meta {
+		font-family: var(--font-mono);
+		font-size: 9.5px;
+		font-weight: 500;
+		color: var(--muted);
+		padding: 1px 6px;
+		border-radius: 4px;
+		background: var(--page);
+		border: 1px solid var(--rule);
+		flex: none;
 	}
 
-	.va-pill.clickable:hover {
-		background: rgba(17, 17, 17, 0.94);
-	}
-
-	.va-pill.status-open {
-		border-color: rgba(74, 222, 128, 0.45);
-	}
-
-	.va-pill.status-vacant {
-		border-color: rgba(248, 113, 113, 0.55);
-	}
-
-	.va-pill.gap {
-		background: rgba(180, 35, 24, 0.94);
-		border-color: rgba(254, 202, 202, 0.65);
-		color: #ffffff;
-	}
-
-	.va-more {
-		opacity: 0.72;
-		font-size: 10px;
+	.va-meta.gap {
+		background: var(--red-bg);
+		border-color: #f4c6be;
+		color: var(--red);
 	}
 
 	.va-dot {
 		width: 6px;
 		height: 6px;
 		border-radius: 99px;
-		background: #ff6b4a;
+		background: var(--muted-light);
+		flex: none;
+		align-self: center;
+	}
+
+	.va-dot.status-open {
+		background: var(--green);
+	}
+
+	.va-dot.status-vacant {
+		background: var(--red);
+	}
+
+	.va-dot.status-construction {
+		background: var(--amber);
+	}
+
+	.va-dot.pulse {
+		background: var(--accent);
 		animation: vaPulse 0.9s infinite ease-in-out;
 	}
 
@@ -519,74 +606,22 @@
 		50% { opacity: 1; }
 	}
 
-	.va-card {
-		position: absolute;
-		left: 10px;
-		right: 10px;
-		bottom: 10px;
-		z-index: 12;
-		padding: 9px 11px;
-		border-radius: 7px;
-		background: rgba(17, 17, 17, 0.88);
-		backdrop-filter: blur(10px);
-		border: 1px solid rgba(255, 255, 255, 0.18);
-		color: #f6f6f4;
-		display: flex;
-		flex-direction: column;
-		gap: 5px;
-		box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
-	}
-
-	.va-card.gap {
-		background: rgba(127, 29, 29, 0.92);
-		border-color: rgba(254, 202, 202, 0.5);
-	}
-
-	.va-card-head {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 8px;
-	}
-
-	.va-kicker {
-		font-family: var(--font-mono);
-		font-size: 9.5px;
-		font-weight: 700;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		color: #fde68a;
-	}
-
-	.va-card:not(.gap) .va-kicker {
-		color: #d4d4d0;
-	}
-
-	.va-close {
-		border: 0;
-		background: transparent;
-		color: rgba(255, 255, 255, 0.75);
-		font-size: 15px;
-		line-height: 1;
-		cursor: pointer;
-		padding: 0 3px;
-	}
-
-	.va-close:hover {
-		color: #ffffff;
-	}
-
 	.va-summary {
 		margin: 0;
-		font-size: 12px;
-		line-height: 1.42;
-		color: #ffffff;
+		font-size: 12.2px;
+		line-height: 1.44;
+		color: var(--ink-soft);
+	}
+
+	.hv-audit.is-gap .va-summary {
+		color: var(--ink);
 	}
 
 	.va-tags {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 4px;
+		margin-top: 1px;
 	}
 
 	.va-tag {
@@ -594,7 +629,38 @@
 		font-size: 9.5px;
 		padding: 1px 6px;
 		border-radius: 4px;
-		background: rgba(255, 255, 255, 0.14);
-		color: #f4f4f2;
+		background: var(--page);
+		border: 1px solid var(--rule);
+		color: var(--muted);
+	}
+
+	.hv-audit.is-gap .va-tag {
+		background: rgba(255, 255, 255, 0.72);
+		border-color: #edd5d1;
+		color: var(--ink-soft);
+	}
+
+	.va-shimmer {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 3px 0 2px;
+	}
+
+	.va-sh {
+		display: block;
+		height: 10px;
+		border-radius: 4px;
+		background: linear-gradient(90deg, #efefe9 25%, #e4e4dc 50%, #efefe9 75%);
+		background-size: 200% 100%;
+		animation: vaShimmer 1.35s infinite ease-in-out;
+	}
+
+	.va-sh.w1 { width: 92%; }
+	.va-sh.w2 { width: 64%; }
+
+	@keyframes vaShimmer {
+		0% { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
 	}
 </style>
