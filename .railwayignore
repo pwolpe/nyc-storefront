@@ -1,0 +1,9 @@
+node_modules
+.svelte-kit
+.wrangler
+build
+dist
+assets-raw
+.env
+.env.*
+.DS_Store
