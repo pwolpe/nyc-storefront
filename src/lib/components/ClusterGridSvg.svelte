@@ -607,13 +607,30 @@
 			}))
 			.sort((a, b) => b.weight - a.weight);
 
+		const estVertW = (name: string) => name.length * 6.5 + 14;
 		const vertLabels: MarginLabel[] = [];
 		for (const lbl of vertRaw) {
-			if (!vertLabels.some((o) => Math.abs(o.pos - lbl.pos) < 58)) {
-				vertLabels.push(lbl);
+			const collides = vertLabels.some((o) => {
+				const minGap = Math.max(56, (estVertW(o.name) + estVertW(lbl.name)) / 2 - 10);
+				return Math.abs(o.pos - lbl.pos) < minGap;
+			});
+			if (!collides) {
+				vertLabels.push({ ...lbl });
 			}
 		}
 		vertLabels.sort((a, b) => a.pos - b.pos);
+		// Gently separate tight neighboring avenue labels (e.g. "Madison Ave" & "Park Ave S") so text never touches
+		for (let i = 1; i < vertLabels.length; i++) {
+			const prev = vertLabels[i - 1];
+			const cur = vertLabels[i];
+			const needed = (estVertW(prev.name) + estVertW(cur.name)) / 2 + 4;
+			const gap = cur.pos - prev.pos;
+			if (gap < needed) {
+				const shift = (needed - gap) / 2;
+				prev.pos = Math.max(MARGIN_LEFT + 20, prev.pos - shift);
+				cur.pos = Math.min(SVG_W - 24, cur.pos + shift);
+			}
+		}
 
 		return {
 			boundaryPaths,
@@ -705,7 +722,6 @@
 					? `GRID STRAIGHTENED ${shard.gridAngleDeg > 0 ? '+' : ''}${shard.gridAngleDeg.toFixed(1)}°`
 					: 'NORTH-SOUTH GRID'}
 			</span>
-			<span class="bp-hint">Hover streets to magnify · Click any block or bordering cluster</span>
 		</div>
 
 		<div class="bp-legend" aria-label="Vacancy color scale">
@@ -801,63 +817,6 @@
 				<!-- Crisp current cluster territory cutout so our streets sit on pure bright paper -->
 				{#each blueprint.boundaryPaths as d}
 					<path {d} fill="#fafaf9" stroke="#d8d8d2" stroke-width="1" pointer-events="none" />
-				{/each}
-
-				<!-- Clickable Neighbor Territory Pills (quiet at rest, high-contrast on hover) -->
-				{#each blueprint.neighbors as item (item.nb.id)}
-					{@const isNbHot = activeNeighborId === item.nb.id}
-					{#if item.showAtRest || isNbHot}
-						{@const txt = isNbHot
-							? `${item.label} · ${pct(item.nb.vacancy_rate, 1)} (${item.diffText}) ↗`
-							: `${item.label} · ${item.rateText}`}
-						{@const w = isNbHot ? Math.max(item.pillW, Math.min(FRAME_R - FRAME_L - 20, txt.length * 6.3 + 26)) : item.pillW}
-						{@const px = Math.max(FRAME_L + w / 2 + 8, Math.min(FRAME_R - w / 2 - 8, item.lx))}
-						{@const py = Math.max(FRAME_T + 16, Math.min(FRAME_B - 16, item.ly))}
-						<g
-							transform="translate({px}, {py})"
-							class="nb-pill"
-							role="link"
-							tabindex="-1"
-							aria-label="Open {item.nb.name}"
-							onmouseenter={() => {
-								hoveredNeighborId = item.nb.id;
-								onHoverNeighbor(item.nb.id);
-							}}
-							onmouseleave={() => {
-								hoveredNeighborId = null;
-								onHoverNeighbor(null);
-							}}
-							onclick={() => goto(`/cluster/${item.nb.id}`)}
-							onkeydown={(e) => {
-								if (e.key === 'Enter' || e.key === ' ') {
-									e.preventDefault();
-									goto(`/cluster/${item.nb.id}`);
-								}
-							}}
-						>
-							<rect
-								x={-w / 2}
-								y="-11"
-								width={w}
-								height="22"
-								rx="4"
-								fill={isNbHot ? '#111111' : 'rgba(255,255,255,0.88)'}
-								stroke={isNbHot ? '#111111' : '#ddddda'}
-								stroke-width="1"
-							/>
-							<text
-								x="0"
-								y="3"
-								text-anchor="middle"
-								fill={isNbHot ? '#ffffff' : '#5e5e59'}
-								font-size="10"
-								font-weight={isNbHot ? '600' : '500'}
-								font-family="JetBrains Mono, ui-monospace, monospace"
-							>
-								{txt}
-							</text>
-						</g>
-					{/if}
 				{/each}
 			</g>
 
@@ -1062,39 +1021,104 @@
 							stroke-width="22"
 							stroke-linecap="round"
 						/>
-
-						{#if isActive}
-							{@const deltaTag =
-								item.seg.vacantDelta !== null && item.seg.vacantDelta !== undefined && item.seg.vacantDelta !== 0
-									? ` · ${item.seg.vacantDelta > 0 ? `+${item.seg.vacantDelta}` : item.seg.vacantDelta} vs '24`
-									: ''}
-							{@const pillText = `${item.seg.streetName} (${item.seg.between}) · ${item.seg.vacant}/${item.seg.total} empty (${pct(item.seg.rate, 1)})${deltaTag}`}
-							{@const pillW = Math.max(170, Math.min(SVG_W - MARGIN_LEFT - 24, pillText.length * 6.6 + 28))}
-							{@const pillX = Math.max(MARGIN_LEFT + pillW / 2, Math.min(SVG_W - 16 - pillW / 2, item.mid[0]))}
-							{@const pillY = item.mid[1] < MARGIN_TOP + 34 ? item.mid[1] + 24 : item.mid[1] - 24}
-							<g transform="translate({pillX}, {pillY})" pointer-events="none">
-								<rect
-									x={-pillW / 2}
-									y="-13"
-									width={pillW}
-									height="24"
-									rx="5"
-									fill="#111111"
-								/>
-								<text
-									x="0"
-									y="2.5"
-									text-anchor="middle"
-									fill="#ffffff"
-									font-size="10.5"
-									font-weight="500"
-									font-family="JetBrains Mono, ui-monospace, monospace"
-								>
-									{pillText}
-								</text>
-							</g>
-						{/if}
 					</g>
+				{/each}
+			</g>
+
+			<!-- Clickable Neighbor Territory Pills (painted ABOVE street context lines so stubs never slice through pill text) -->
+			<g class="neighbor-pills-layer" clip-path="url(#map-frame-clip)">
+				{#each blueprint.neighbors as item (item.nb.id)}
+					{@const isNbHot = activeNeighborId === item.nb.id}
+					{#if item.showAtRest || isNbHot}
+						{@const txt = isNbHot
+							? `${item.label} · ${pct(item.nb.vacancy_rate, 1)} (${item.diffText}) ↗`
+							: `${item.label} · ${item.rateText} ↗`}
+						{@const restW = Math.max(item.pillW + 12, txt.length * 6.2 + 20)}
+						{@const w = isNbHot ? Math.max(restW, Math.min(FRAME_R - FRAME_L - 20, txt.length * 6.3 + 26)) : restW}
+						{@const px = Math.max(FRAME_L + w / 2 + 8, Math.min(FRAME_R - w / 2 - 8, item.lx))}
+						{@const py = Math.max(FRAME_T + 16, Math.min(FRAME_B - 16, item.ly))}
+						<g
+							transform="translate({px}, {py})"
+							class="nb-pill"
+							role="link"
+							tabindex="-1"
+							aria-label="Open {item.nb.name}"
+							onmouseenter={() => {
+								hoveredNeighborId = item.nb.id;
+								onHoverNeighbor(item.nb.id);
+							}}
+							onmouseleave={() => {
+								hoveredNeighborId = null;
+								onHoverNeighbor(null);
+							}}
+							onclick={() => goto(`/cluster/${item.nb.id}`)}
+							onkeydown={(e) => {
+								if (e.key === 'Enter' || e.key === ' ') {
+									e.preventDefault();
+									goto(`/cluster/${item.nb.id}`);
+								}
+							}}
+						>
+							<rect
+								x={-w / 2}
+								y="-11"
+								width={w}
+								height="22"
+								rx="4"
+								fill={isNbHot ? '#111111' : 'rgba(255,255,255,0.94)'}
+								stroke={isNbHot ? '#111111' : '#cfcfc9'}
+								stroke-width="1"
+							/>
+							<text
+								x="0"
+								y="3"
+								text-anchor="middle"
+								fill={isNbHot ? '#ffffff' : '#5e5e59'}
+								font-size="10"
+								font-weight={isNbHot ? '600' : '500'}
+								font-family="JetBrains Mono, ui-monospace, monospace"
+							>
+								{txt}
+							</text>
+						</g>
+					{/if}
+				{/each}
+			</g>
+
+			<!-- Top-most Active Block Hover Pill (always sits above neighbor pills & streets) -->
+			<g class="active-tooltip-layer" pointer-events="none">
+				{#each orderedSegments as item (item.seg.id)}
+					{#if activeSeg?.id === item.seg.id}
+						{@const deltaTag =
+							item.seg.vacantDelta !== null && item.seg.vacantDelta !== undefined && item.seg.vacantDelta !== 0
+								? ` · ${item.seg.vacantDelta > 0 ? `+${item.seg.vacantDelta}` : item.seg.vacantDelta} vs '24`
+								: ''}
+						{@const pillText = `${item.seg.streetName} (${item.seg.between}) · ${item.seg.vacant}/${item.seg.total} empty (${pct(item.seg.rate, 1)})${deltaTag} →`}
+						{@const pillW = Math.max(170, Math.min(SVG_W - MARGIN_LEFT - 24, pillText.length * 6.6 + 28))}
+						{@const pillX = Math.max(MARGIN_LEFT + pillW / 2, Math.min(SVG_W - 16 - pillW / 2, item.mid[0]))}
+						{@const pillY = item.mid[1] < MARGIN_TOP + 34 ? item.mid[1] + 24 : item.mid[1] - 24}
+						<g transform="translate({pillX}, {pillY})">
+							<rect
+								x={-pillW / 2}
+								y="-13"
+								width={pillW}
+								height="24"
+								rx="5"
+								fill="#111111"
+							/>
+							<text
+								x="0"
+								y="2.5"
+								text-anchor="middle"
+								fill="#ffffff"
+								font-size="10.5"
+								font-weight="500"
+								font-family="JetBrains Mono, ui-monospace, monospace"
+							>
+								{pillText}
+							</text>
+						</g>
+					{/if}
 				{/each}
 			</g>
 
@@ -1294,10 +1318,6 @@
 		border-radius: 4px;
 	}
 
-	.bp-hint {
-		color: var(--muted);
-	}
-
 	.bp-legend {
 		display: flex;
 		align-items: center;
@@ -1375,11 +1395,5 @@
 
 	.margin-lbl.dimmed {
 		opacity: 0.34;
-	}
-
-	@media (max-width: 720px) {
-		.bp-hint {
-			display: none;
-		}
 	}
 </style>

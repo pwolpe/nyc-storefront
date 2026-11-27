@@ -5,7 +5,6 @@
 	import TopBar from '$lib/components/TopBar.svelte';
 	import ClusterGridSvg from '$lib/components/ClusterGridSvg.svelte';
 	import ClusterCohesion from '$lib/components/ClusterCohesion.svelte';
-	import Sparkline from '$lib/components/Sparkline.svelte';
 	import ShareButton from '$lib/components/ShareButton.svelte';
 
 	let { data }: { data: PageData } = $props();
@@ -153,11 +152,38 @@
 		return () => controller.abort();
 	});
 
-	const clusterSpark = $derived(
-		(cluster.history || []).map((h) => ({
-			label: `'${String(h.year).slice(-2)}`,
-			value: h.rate
-		}))
+	// Compact yearly net empty-storefront swing (+ = fewer empty / filled, - = more empty)
+	let hoveredClusterYr = $state<number | null>(null);
+	const clusterNetBars = $derived.by(() => {
+		const hist = [...(cluster.history || [])].sort((a, b) => a.year - b.year);
+		if (hist.length < 2) return [];
+		const out: Array<{
+			year: number;
+			prevYear: number;
+			net: number;
+			rateDiff: number;
+			vacant: number;
+			total: number;
+		}> = [];
+		for (let i = 1; i < hist.length; i++) {
+			const prev = hist[i - 1];
+			const cur = hist[i];
+			out.push({
+				year: cur.year,
+				prevYear: prev.year,
+				net: prev.vacant - cur.vacant,
+				rateDiff: cur.rate - prev.rate,
+				vacant: cur.vacant,
+				total: cur.total
+			});
+		}
+		return out;
+	});
+	const clusterNetMaxAbs = $derived(Math.max(2, ...clusterNetBars.map((b) => Math.abs(b.net))));
+	const activeClusterNetBar = $derived(
+		hoveredClusterYr !== null
+			? clusterNetBars.find((b) => b.year === hoveredClusterYr) ?? clusterNetBars[clusterNetBars.length - 1]
+			: clusterNetBars[clusterNetBars.length - 1] ?? null
 	);
 
 	// Top 5 hardest-hit blocks (prefer meaningful blocks with >= 3 storefronts, sorted by vacancy rate then vacant count)
@@ -272,35 +298,59 @@
 					</div>
 				</div>
 
-				{#if clusterSpark.length >= 2}
-					{@const h21 = cluster.history?.find((h) => h.year === 2021)}
-					{@const diff21 = h21 && h21.total >= 5 ? cluster.vacancy_rate - h21.rate : null}
-					<div class="trend-strip">
-						<div class="trend-copy">
-							<span class="trend-kicker">5-Yr Cluster Trend · DOF</span>
-							{#if cluster.yoy_change !== null && cluster.yoy_change !== undefined}
-								<strong class="trend-delta {deltaTone(cluster.yoy_change, 0.01)}">
-									{deltaPts(cluster.yoy_change, 1)} YoY
-								</strong>
-							{:else}
-								<strong class="trend-delta flat">Insufficient 2024 base</strong>
-							{/if}
-							{#if diff21 !== null && h21}
-								<span class="trend-nta">
-									Since 2021 ({pct(h21.rate, 0)}):
-									<em class={deltaTone(diff21, 0.01)}>
-										{deltaPts(diff21, 1)}
-									</em>
-								</span>
-							{/if}
+				{#if clusterNetBars.length >= 2 && activeClusterNetBar}
+					<div
+						class="net-strip"
+						role="region"
+						aria-label="Annual empty storefront change 2022 to 2025"
+						onmouseleave={() => (hoveredClusterYr = null)}
+					>
+						<div class="net-copy">
+							<span class="trend-kicker">Yearly Empty Swing · DOF</span>
+							<strong
+								class="net-val"
+								class:better={activeClusterNetBar.net > 0}
+								class:worse={activeClusterNetBar.net < 0}
+							>
+								{#if activeClusterNetBar.net > 0}
+									{activeClusterNetBar.net} fewer empty
+								{:else if activeClusterNetBar.net < 0}
+									+{Math.abs(activeClusterNetBar.net)} more empty
+								{:else}
+									Unchanged
+								{/if}
+							</strong>
+							<span class="net-sub">
+								'{String(activeClusterNetBar.prevYear).slice(-2)}→'{String(activeClusterNetBar.year).slice(-2)} · {activeClusterNetBar.vacant}/{activeClusterNetBar.total} empty
+							</span>
 						</div>
-						<Sparkline
-							points={clusterSpark}
-							width={98}
-							height={26}
-							tone={deltaTone(cluster.yoy_change, 0.01)}
-							showEndpoints
-						/>
+						<div class="net-bars">
+							{#each clusterNetBars as b (b.year)}
+								{@const pctH = Math.max(12, Math.round((Math.abs(b.net) / clusterNetMaxAbs) * 100))}
+								{@const isHot = activeClusterNetBar.year === b.year}
+								<button
+									type="button"
+									class="nb-col"
+									class:hot={isHot}
+									onmouseenter={() => (hoveredClusterYr = b.year)}
+									onfocus={() => (hoveredClusterYr = b.year)}
+									title="{b.prevYear}→{b.year}: {b.net > 0 ? `${b.net} fewer empty` : b.net < 0 ? `+${Math.abs(b.net)} more empty` : 'No change'} ({b.vacant}/{b.total} empty)"
+								>
+									<span class="nb-half pos">
+										{#if b.net > 0}
+											<i class="nb-bar pos" style="height:{pctH}%"></i>
+										{/if}
+									</span>
+									<span class="nb-axis"></span>
+									<span class="nb-half neg">
+										{#if b.net < 0}
+											<i class="nb-bar neg" style="height:{pctH}%"></i>
+										{/if}
+									</span>
+									<span class="nb-yr">'{String(b.year).slice(-2)}</span>
+								</button>
+							{/each}
+						</div>
 					</div>
 				{/if}
 
@@ -646,15 +696,11 @@
 		font-weight: 600;
 	}
 
-	.hb-stat .worse,
-	.trend-delta.worse,
-	.trend-nta em.worse {
+	.hb-stat .worse {
 		color: var(--red);
 	}
 
-	.hb-stat .better,
-	.trend-delta.better,
-	.trend-nta em.better {
+	.hb-stat .better {
 		color: var(--green);
 	}
 
@@ -738,7 +784,15 @@
 		color: var(--ink);
 	}
 
-	.trend-strip {
+	.trend-kicker {
+		font-family: var(--font-mono);
+		font-size: 9.5px;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--muted);
+	}
+
+	.net-strip {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -748,45 +802,115 @@
 		border-top: 1px solid var(--rule);
 	}
 
-	.trend-copy {
+	.net-copy {
 		display: flex;
 		flex-direction: column;
-		gap: 1px;
+		gap: 2px;
 		min-width: 0;
+		flex: 1;
 	}
 
-	.trend-kicker {
+	.net-val {
 		font-family: var(--font-mono);
-		font-size: 9.5px;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: var(--muted);
-	}
-
-	.trend-delta {
-		font-family: var(--font-mono);
+		font-variant-numeric: tabular-nums;
 		font-size: 13px;
 		font-weight: 600;
+		line-height: 1.25;
 		color: var(--ink);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
-	.trend-delta.flat {
-		color: var(--muted);
+	.net-val.better {
+		color: var(--green);
 	}
 
-	.trend-nta {
-		font-size: 10.5px;
+	.net-val.worse {
+		color: var(--red);
+	}
+
+	.net-sub {
+		font-family: var(--font-mono);
+		font-variant-numeric: tabular-nums;
+		font-size: 10px;
+		line-height: 1.3;
 		color: var(--muted);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 
-	.trend-nta em {
-		font-style: normal;
+	.net-bars {
+		display: inline-flex;
+		align-items: stretch;
+		gap: 4px;
+		flex: none;
+	}
+
+	.nb-col {
+		width: 24px;
+		border: 0;
+		background: transparent;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		cursor: pointer;
+	}
+
+	.nb-half {
+		width: 14px;
+		height: 15px;
+		display: flex;
+		justify-content: center;
+	}
+
+	.nb-half.pos {
+		align-items: flex-end;
+	}
+
+	.nb-half.neg {
+		align-items: flex-start;
+	}
+
+	.nb-axis {
+		width: 100%;
+		height: 1px;
+		background: var(--line);
+	}
+
+	.nb-bar {
+		width: 11px;
+		border-radius: 1.5px;
+		display: block;
+		opacity: 0.58;
+		transition: opacity 0.1s ease;
+	}
+
+	.nb-col.hot .nb-bar,
+	.nb-col:hover .nb-bar {
+		opacity: 1;
+	}
+
+	.nb-bar.pos {
+		background: var(--green);
+	}
+
+	.nb-bar.neg {
+		background: var(--red);
+	}
+
+	.nb-yr {
 		font-family: var(--font-mono);
+		font-size: 9px;
+		color: var(--muted-light);
+		margin-top: 2px;
+	}
+
+	.nb-col.hot .nb-yr {
+		color: var(--ink);
 		font-weight: 600;
-		color: var(--ink-soft);
 	}
 
 	.hb-tabs {

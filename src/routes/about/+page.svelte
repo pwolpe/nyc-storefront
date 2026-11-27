@@ -42,23 +42,51 @@
 				</div>
 			</div>
 
+			<div class="clusters-note">
+				<span class="kicker">Why Clusters Instead of Neighborhoods?</span>
+				<p>
+					Official city maps group storefronts by ZIP code or census neighborhood, which often blurs
+					together bustling avenues and struggling stretches, or splits a single shopping corridor
+					right down the middle.
+				</p>
+				<p>
+					The {numFmt(meta.clusterCount)} clusters here take a cue from Supreme Court Justice Anthony
+					Kennedy, who argued in redistricting opinions like
+					<a
+						href="https://tile.loc.gov/storage-services/service/ll/usrep/usrep541/usrep541267/usrep541267.pdf"
+						target="_blank"
+						rel="noopener noreferrer"><em>Vieth v. Jubelirer</em> (PDF) ↗</a
+					>
+					that modern data and simple geometric rules (keeping regions compact and contiguous) can
+					reveal real communities on the ground rather than arbitrary lines. Neighboring blocks with
+					similar vacancy rates are grouped from the street up into tight, street-aligned pockets so
+					real patterns stand out cleanly.
+				</p>
+			</div>
+
 			<div class="prose">
 				<span class="kicker">How This Started</span>
 				<p>
-					The spark was Mark Levine’s
+					This project started after reading Mark Levine’s
 					<a
 						href="https://x.com/marklevinenyc/status/2125612130007134597?s=46"
 						target="_blank"
-						rel="noopener noreferrer">post on NYC storefront vacancies</a
-					>, which pointed to the city’s public registry. The underlying data is genuinely great,
-					even though the official site is only okay for exploring street by street, so I spent
-					Thanksgiving Day with Gemini Neon putting together this companion.
+						rel="noopener noreferrer">post on NYC storefront vacancies ↗</a
+					>
+					and exploring the Comptroller’s official
+					<a
+						href="https://comptroller.nyc.gov/services/for-the-public/storefront-vacancy/dashboard/"
+						target="_blank"
+						rel="noopener noreferrer">Storefront Vacancy Dashboard ↗</a
+					>. Because New York City makes so much of this data public, I wanted to see how much
+					deeper we could dig street by street and building by building, which turned into a fun
+					Thanksgiving Day project with Gemini Neon.
 				</p>
 
 				<p>
-					I’m grateful to Mark for keeping storefront health in the public conversation. On a
-					personal note, his COVID-era posts were really valuable to me at a time when good
-					information was hard to come by. I appreciate his leadership then and now.
+					I’ve appreciated Mark’s updates going back to his COVID-era posts, which were genuinely
+					helpful at a time when good local information was hard to come by, and I’m glad he’s
+					keeping storefront health in the public conversation.
 				</p>
 
 				<p>
@@ -82,23 +110,6 @@
 						rel="noopener noreferrer">github.com/pwolpe/nyc-storefront ↗</a
 					>, so journalists, researchers, block associations, or other cities are welcome to use,
 					inspect, and build on it.
-				</p>
-			</div>
-
-			<div class="clusters-note">
-				<span class="kicker">Why Clusters Instead of Neighborhoods?</span>
-				<p>
-					Official city maps group storefronts by ZIP code or census neighborhood, which often blurs
-					together bustling avenues and struggling stretches, or splits a single shopping corridor
-					right down the middle.
-				</p>
-				<p>
-					The {numFmt(meta.clusterCount)} clusters here take a cue from Supreme Court Justice Anthony
-					Kennedy, who argued in redistricting opinions like <em>Vieth v. Jubelirer</em> that modern
-					data and simple geometric rules (keeping regions compact and contiguous) can reveal real
-					communities on the ground rather than arbitrary lines. Neighboring blocks with similar
-					vacancy rates are grouped from the street up into tight, street-aligned pockets so real
-					patterns stand out cleanly.
 				</p>
 			</div>
 
@@ -262,7 +273,8 @@
 		font-weight: 600;
 	}
 
-	.prose a {
+	.prose a,
+	.clusters-note a {
 		color: var(--ink);
 		text-decoration: underline;
 		text-decoration-color: var(--line);
@@ -270,7 +282,8 @@
 		transition: color 0.12s ease, text-decoration-color 0.12s ease;
 	}
 
-	.prose a:hover {
+	.prose a:hover,
+	.clusters-note a:hover {
 		color: var(--accent);
 		text-decoration-color: var(--accent);
 	}
@@ -287,8 +300,8 @@
 
 	.clusters-note p {
 		margin: 0;
-		font-size: 13.5px;
-		line-height: 1.62;
+		font-size: 14px;
+		line-height: 1.65;
 		color: var(--ink-soft);
 	}
 

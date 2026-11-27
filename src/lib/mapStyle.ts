@@ -169,7 +169,7 @@ export function prepareStreetGridBasemap(map: maplibregl.Map): {
 	}
 
 	if (map.getLayer('highway_major_casing')) {
-		map.setPaintProperty('highway_major_casing', 'line-color', 'rgba(17, 17, 17, 0.28)');
+		map.setPaintProperty('highway_major_casing', 'line-color', 'rgba(17, 17, 17, 0.16)');
 	}
 
 	if (map.getLayer('highway_major_inner')) {
@@ -177,53 +177,72 @@ export function prepareStreetGridBasemap(map: maplibregl.Map): {
 	}
 
 	if (map.getLayer('highway-name-minor')) {
-		map.setLayerZoomRange('highway-name-minor', 12.6, 24);
-		map.setLayoutProperty('highway-name-minor', 'text-font', ['Noto Sans Bold']);
-		map.setLayoutProperty('highway-name-minor', 'symbol-spacing', 220);
-		map.setLayoutProperty('highway-name-minor', 'text-padding', 3);
+		map.setLayerZoomRange('highway-name-minor', 13.3, 24);
+		map.setLayoutProperty('highway-name-minor', 'text-font', ['Noto Sans Regular']);
+		map.setLayoutProperty('highway-name-minor', 'symbol-spacing', 280);
+		map.setLayoutProperty('highway-name-minor', 'text-padding', 5);
+		map.setLayoutProperty('highway-name-minor', 'text-letter-spacing', 0.02);
 		map.setLayoutProperty('highway-name-minor', 'text-size', [
 			'interpolate',
 			['linear'],
 			['zoom'],
-			12.6,
-			10,
-			14,
-			11.5,
-			16,
-			13
+			13.3,
+			9.5,
+			14.8,
+			10.5,
+			16.5,
+			11.8
 		]);
-		map.setPaintProperty('highway-name-minor', 'text-color', '#262624');
-		map.setPaintProperty('highway-name-minor', 'text-halo-color', 'rgba(255, 255, 255, 0.96)');
-		map.setPaintProperty('highway-name-minor', 'text-halo-width', 2);
-		map.setPaintProperty('highway-name-minor', 'text-halo-blur', 0.4);
+		map.setPaintProperty('highway-name-minor', 'text-color', [
+			'interpolate',
+			['linear'],
+			['zoom'],
+			13.3,
+			'#7a7a74',
+			15.5,
+			'#565650'
+		]);
+		map.setPaintProperty('highway-name-minor', 'text-halo-color', 'rgba(255, 255, 255, 0.84)');
+		map.setPaintProperty('highway-name-minor', 'text-halo-width', 1.3);
+		map.setPaintProperty('highway-name-minor', 'text-halo-blur', 0.5);
 	}
 
 	if (map.getLayer('highway-name-major')) {
-		map.setLayerZoomRange('highway-name-major', 11.2, 24);
-		map.setLayoutProperty('highway-name-major', 'text-font', ['Noto Sans Bold']);
-		map.setLayoutProperty('highway-name-major', 'symbol-spacing', 190);
+		map.setLayerZoomRange('highway-name-major', 11.4, 24);
+		map.setLayoutProperty('highway-name-major', 'text-font', ['Noto Sans Regular']);
+		map.setLayoutProperty('highway-name-major', 'symbol-spacing', 320);
+		map.setLayoutProperty('highway-name-major', 'text-padding', 6);
+		map.setLayoutProperty('highway-name-major', 'text-letter-spacing', 0.03);
 		map.setLayoutProperty('highway-name-major', 'text-size', [
 			'interpolate',
 			['linear'],
 			['zoom'],
 			11.5,
-			11,
+			9.5,
 			13.5,
-			12.5,
+			10.8,
 			16,
-			14.5
+			12.5
 		]);
-		map.setPaintProperty('highway-name-major', 'text-color', '#111111');
-		map.setPaintProperty('highway-name-major', 'text-halo-color', '#ffffff');
-		map.setPaintProperty('highway-name-major', 'text-halo-width', 2.4);
-		map.setPaintProperty('highway-name-major', 'text-halo-blur', 0.3);
+		map.setPaintProperty('highway-name-major', 'text-color', [
+			'interpolate',
+			['linear'],
+			['zoom'],
+			11.5,
+			'#686862',
+			14.5,
+			'#44443f'
+		]);
+		map.setPaintProperty('highway-name-major', 'text-halo-color', 'rgba(255, 255, 255, 0.86)');
+		map.setPaintProperty('highway-name-major', 'text-halo-width', 1.5);
+		map.setPaintProperty('highway-name-major', 'text-halo-blur', 0.5);
 	}
 
 	for (const id of ['label_other', 'label_village', 'label_town']) {
 		if (map.getLayer(id)) {
-			map.setPaintProperty(id, 'text-color', '#4a4a46');
-			map.setPaintProperty(id, 'text-halo-color', 'rgba(255, 255, 255, 0.92)');
-			map.setPaintProperty(id, 'text-halo-width', 1.8);
+			map.setPaintProperty(id, 'text-color', '#4f4f4a');
+			map.setPaintProperty(id, 'text-halo-color', 'rgba(255, 255, 255, 0.88)');
+			map.setPaintProperty(id, 'text-halo-width', 1.6);
 		}
 	}
 

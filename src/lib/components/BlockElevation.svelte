@@ -39,6 +39,7 @@
 	// ⏳ Block Time Machine (2019–2025 playable scrubber)
 	let selectedYear = $state<number>(2025);
 	let isPlaying = $state<boolean>(false);
+	let tmTouched = $state<boolean>(false);
 	let playTimer: ReturnType<typeof setInterval> | null = null;
 
 	const timelineYears = $derived.by(() => {
@@ -63,6 +64,7 @@
 			return;
 		}
 		isPlaying = true;
+		tmTouched = true;
 		// Start from the earliest year if currently at latest
 		if (selectedYear >= timelineYears[timelineYears.length - 1]) {
 			selectedYear = timelineYears[0];
@@ -84,6 +86,7 @@
 		void _segId;
 		stopPlayback();
 		selectedYear = 2025;
+		tmTouched = false;
 	});
 
 	onMount(() => {
@@ -193,6 +196,47 @@
 			tot += l.vacantCount + l.occupiedCount;
 		}
 		return { vac, tot, pct: tot > 0 ? Math.round((vac / tot) * 100) : 0 };
+	});
+
+	// Ultra-light year-over-year net swing for the Time Machine scrubber (e.g. "+2 filled vs 2024" / "+1 empty vs 2024")
+	const activeYearDelta = $derived.by(() => {
+		const idx = timelineYears.indexOf(selectedYear);
+		if (idx <= 0) return null;
+		const prevYear = timelineYears[idx - 1];
+		const prevLots = [
+			...sideA.map((l) => projectLotToYear(l, prevYear)),
+			...sideB.map((l) => projectLotToYear(l, prevYear))
+		];
+		let prevVac = 0;
+		let prevTot = 0;
+		for (const l of prevLots) {
+			prevVac += l.vacantCount;
+			prevTot += l.vacantCount + l.occupiedCount;
+		}
+		if (prevTot === 0 || activeYearTotals.tot === 0) return null;
+		const vacDiff = activeYearTotals.vac - prevVac;
+		return { prevYear, vacDiff };
+	});
+
+	// Highlight exact buildings whose status flipped vs the prior year while using the Time Machine
+	const flippedByLotId = $derived.by(() => {
+		const map = new Map<string, 'emptied' | 'filled'>();
+		if (!tmTouched) return map;
+		const idx = timelineYears.indexOf(selectedYear);
+		if (idx <= 0) return map;
+		const prevYear = timelineYears[idx - 1];
+		const pairs: Array<[BlockLot, BlockLot]> = [
+			...displaySideA.map((cur, i): [BlockLot, BlockLot] => [cur, projectLotToYear(sideA[i], prevYear)]),
+			...displaySideB.map((cur, i): [BlockLot, BlockLot] => [cur, projectLotToYear(sideB[i], prevYear)])
+		];
+		for (const [cur, prev] of pairs) {
+			const curTot = cur.vacantCount + cur.occupiedCount;
+			const prevTot = prev.vacantCount + prev.occupiedCount;
+			if (curTot === 0 || prevTot === 0) continue;
+			if (cur.vacantCount > prev.vacantCount) map.set(cur.id, 'emptied');
+			else if (cur.vacantCount < prev.vacantCount) map.set(cur.id, 'filled');
+		}
+		return map;
 	});
 
 	function getLotContext(lot: BlockLot): {
@@ -486,6 +530,7 @@
 							{@const topTenant = lotCtx.tenants[0] ?? null}
 							{@const yrStreak = selectedYear < 2025 ? lotStreakAtYear(lot, selectedYear) : lotCtx.vacantYears}
 							{@const isChronic = lot.vacantCount > 0 && yrStreak >= 3}
+							{@const flipState = flippedByLotId.get(lot.id) ?? null}
 							<button
 								type="button"
 								class="lot-bldg top-bldg kind-{lot.kind}"
@@ -493,6 +538,8 @@
 								class:corner={lot.isCorner}
 								class:narrow={isNarrow}
 								class:chronic={isChronic}
+								class:flip-emptied={flipState === 'emptied'}
+								class:flip-filled={flipState === 'filled'}
 								style="left:{leftPct}%; width:{widthPct}%; height:{bldgHeight(lot.floors)}px"
 								title="{lot.address}{topTenant ? ` · ${tenantChipLabel(topTenant, lot)}` : ''}{isChronic ? ` · Vacant ${yrStreak} yrs` : ''} · {lot.frontFt}ft · {lot.floors}F · {kindBadge(lot)}"
 								onmouseenter={() => handleLotHover(lot)}
@@ -505,7 +552,11 @@
 									{#if isOtherCluster}
 										<span class="other-dot" title="Across cluster border"></span>
 									{/if}
-									{#if isChronic && widthPct >= 3.8}
+									{#if flipState && widthPct >= 3.6}
+										<span class="flip-pill {flipState}" title="{flipState === 'emptied' ? 'Went vacant' : 'Filled'} in {selectedYear}">
+											{flipState === 'emptied' ? '+EMPTY' : 'FILLED'}
+										</span>
+									{:else if isChronic && widthPct >= 3.8}
 										<span class="age-pill" title="Vacant {yrStreak} years">{yrStreak}y</span>
 									{/if}
 									<span class="bldg-num">{shortLabel(lot)}</span>
@@ -587,6 +638,7 @@
 							{@const topTenant = lotCtx.tenants[0] ?? null}
 							{@const yrStreak = selectedYear < 2025 ? lotStreakAtYear(lot, selectedYear) : lotCtx.vacantYears}
 							{@const isChronic = lot.vacantCount > 0 && yrStreak >= 3}
+							{@const flipState = flippedByLotId.get(lot.id) ?? null}
 							<button
 								type="button"
 								class="lot-bldg bottom-bldg kind-{lot.kind}"
@@ -594,6 +646,8 @@
 								class:corner={lot.isCorner}
 								class:narrow={isNarrow}
 								class:chronic={isChronic}
+								class:flip-emptied={flipState === 'emptied'}
+								class:flip-filled={flipState === 'filled'}
 								style="left:{leftPct}%; width:{widthPct}%; height:{bldgHeight(lot.floors)}px"
 								title="{lot.address}{topTenant ? ` · ${tenantChipLabel(topTenant, lot)}` : ''}{isChronic ? ` · Vacant ${yrStreak} yrs` : ''} · {lot.frontFt}ft · {lot.floors}F · {kindBadge(lot)}"
 								onmouseenter={() => handleLotHover(lot)}
@@ -621,7 +675,11 @@
 									{#if isOtherCluster}
 										<span class="other-dot" title="Across cluster border"></span>
 									{/if}
-									{#if isChronic && widthPct >= 3.8}
+									{#if flipState && widthPct >= 3.6}
+										<span class="flip-pill {flipState}" title="{flipState === 'emptied' ? 'Went vacant' : 'Filled'} in {selectedYear}">
+											{flipState === 'emptied' ? '+EMPTY' : 'FILLED'}
+										</span>
+									{:else if isChronic && widthPct >= 3.8}
 										<span class="age-pill" title="Vacant {yrStreak} years">{yrStreak}y</span>
 									{/if}
 									<span class="bldg-num">{shortLabel(lot)}</span>
@@ -704,6 +762,7 @@
 							class:active={selectedYear === yr}
 							onclick={() => {
 								stopPlayback();
+								tmTouched = true;
 								selectedYear = yr;
 							}}
 						>
@@ -717,6 +776,21 @@
 				<span>
 					{activeYearTotals.vac}/{activeYearTotals.tot} empty ({activeYearTotals.pct}%)
 				</span>
+				{#if activeYearDelta}
+					<span
+						class="tm-delta"
+						class:better={activeYearDelta.vacDiff < 0}
+						class:worse={activeYearDelta.vacDiff > 0}
+					>
+						{#if activeYearDelta.vacDiff < 0}
+							↓ {Math.abs(activeYearDelta.vacDiff)} fewer empty vs {activeYearDelta.prevYear}
+						{:else if activeYearDelta.vacDiff > 0}
+							↑ +{activeYearDelta.vacDiff} empty vs {activeYearDelta.prevYear}
+						{:else}
+							Flat vs {activeYearDelta.prevYear}
+						{/if}
+					</span>
+				{/if}
 				{#if selectedYear < 2025}
 					<button
 						type="button"
@@ -828,6 +902,58 @@
 
 	.tm-stat.historical strong {
 		color: #e62217;
+	}
+
+	.tm-delta {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		font-weight: 600;
+		padding: 1.5px 6px;
+		border-radius: 4px;
+		background: var(--quiet);
+		color: var(--muted);
+	}
+
+	.tm-delta.better {
+		background: var(--green-bg);
+		color: var(--green);
+	}
+
+	.tm-delta.worse {
+		background: var(--red-bg);
+		color: var(--red);
+	}
+
+	.lot-bldg.flip-emptied {
+		box-shadow: 0 0 0 2px #d9381e;
+		z-index: 4;
+	}
+
+	.lot-bldg.flip-filled {
+		box-shadow: 0 0 0 2px #0e6e48;
+		z-index: 4;
+	}
+
+	.flip-pill {
+		position: absolute;
+		top: 3px;
+		right: 3px;
+		font-family: var(--font-mono);
+		font-size: 7.5px;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		padding: 1px 3.5px;
+		border-radius: 3px;
+		line-height: 1.1;
+		color: #ffffff;
+	}
+
+	.flip-pill.emptied {
+		background: #d9381e;
+	}
+
+	.flip-pill.filled {
+		background: #0e6e48;
 	}
 
 	.tm-reset {

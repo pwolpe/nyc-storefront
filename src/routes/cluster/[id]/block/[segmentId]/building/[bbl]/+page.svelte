@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import type { PageData } from './$types';
 	import type {
 		BuildingDossier,
@@ -340,6 +342,28 @@
 			if (n) warmBuilding(n);
 		}, 600);
 		return () => clearTimeout(timer);
+	});
+
+	// Keyboard sidewalk walking: ← / → walks door-to-door, ↑ steps back out to the Block elevation
+	onMount(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.metaKey || e.ctrlKey || e.altKey) return;
+			const tag = (document.activeElement?.tagName || '').toUpperCase();
+			if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+			if (e.key === 'ArrowLeft' && prevBuilding) {
+				e.preventDefault();
+				goto(`/cluster/${cluster.id}/block/${seg.id}/building/${prevBuilding.bbl}`);
+			} else if (e.key === 'ArrowRight' && nextBuilding) {
+				e.preventDefault();
+				goto(`/cluster/${cluster.id}/block/${seg.id}/building/${nextBuilding.bbl}`);
+			} else if (e.key === 'ArrowUp') {
+				e.preventDefault();
+				goto(`/cluster/${cluster.id}/block/${seg.id}`);
+			}
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
 	});
 
 	$effect(() => {
@@ -900,17 +924,20 @@
 		{:else if dossier}
 			<!-- Top Nav Strip: Back to Block + Door-to-Door Sidewalk Stepper -->
 			<nav class="bldg-nav-bar" aria-label="Block and adjacent buildings">
-				<a href="/cluster/{cluster.id}/block/{seg.id}" class="back-link">
+				<a href="/cluster/{cluster.id}/block/{seg.id}" class="back-link" title="Back to block elevation (↑)">
 					← {seg.streetName} ({seg.between})
 				</a>
 				<div class="nav-right-group">
 					{#if prevBuilding || nextBuilding}
+						<span class="kbd-walk-hint" title="Use arrow keys to walk door-to-door or step back to the block">
+							←→ door · ↑ block
+						</span>
 						<div class="door-stepper">
 							{#if prevBuilding}
 								<a
 									href="/cluster/{cluster.id}/block/{seg.id}/building/{prevBuilding.bbl}"
 									class="door-link"
-									title="Walk next door to {prevBuilding.label}"
+									title="Walk next door to {prevBuilding.label} (←)"
 									onmouseenter={() => prefetchDoor(prevBuilding.bbl)}
 								>
 									<span class="dl-arr">←</span>
@@ -925,7 +952,7 @@
 								<a
 									href="/cluster/{cluster.id}/block/{seg.id}/building/{nextBuilding.bbl}"
 									class="door-link"
-									title="Walk next door to {nextBuilding.label}"
+									title="Walk next door to {nextBuilding.label} (→)"
 									onmouseenter={() => prefetchDoor(nextBuilding.bbl)}
 								>
 									<span>{nextBuilding.label}</span>
@@ -1722,6 +1749,19 @@
 		align-items: center;
 		gap: 10px;
 		flex-wrap: wrap;
+	}
+
+	.kbd-walk-hint {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		color: var(--muted-light);
+		letter-spacing: 0.02em;
+	}
+
+	@media (max-width: 860px) {
+		.kbd-walk-hint {
+			display: none;
+		}
 	}
 
 	.door-link {

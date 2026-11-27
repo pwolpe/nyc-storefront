@@ -13,6 +13,16 @@
 	let hoveredQIdx = $state<number | null>(null);
 	let hoveredFlowIdx = $state<number | null>(null);
 
+	// Controls for the enhanced Storefront Change chart
+	type FlowScope = 'Citywide' | 'Manhattan' | 'Brooklyn' | 'Queens' | 'Bronx' | 'Staten Island';
+	type FlowMode = 'net' | 'flow';
+	type FlowSegment = 'all' | 'smallBiz' | 'chains';
+
+	const FLOW_SCOPES: FlowScope[] = ['Citywide', 'Manhattan', 'Brooklyn', 'Queens', 'Bronx', 'Staten Island'];
+	let flowScope = $state<FlowScope>('Citywide');
+	let flowMode = $state<FlowMode>('net');
+	let flowSegment = $state<FlowSegment>('all');
+
 	// Toggleable series on the multi-quarter line chart
 	const SERIES = [
 		{ key: 'Citywide', label: 'Citywide', color: '#111111', width: 2.4 },
@@ -98,44 +108,217 @@
 		hoveredQIdx !== null && quarters[hoveredQIdx] ? quarters[hoveredQIdx] : latest
 	);
 
-	// SVG geometry for Net Storefront Change bar chart
+	// SVG geometry for Net Storefront Change / Openings vs. Closings bar chart
 	const BAR_W = 460;
-	const BAR_H = 228;
-	const B_PAD = { top: 18, right: 16, bottom: 28, left: 42 };
+	const BAR_H = 216;
+	const B_PAD = { top: 18, right: 16, bottom: 26, left: 44 };
 
-	const flowChart = $derived.by(() => {
-		if (flowQuarters.length === 0) return null;
-		const maxAbs = Math.max(
-			50,
-			...flowQuarters.map((q) => Math.abs(q.netChange ?? 0)),
-			...flowQuarters.map((q) => Math.abs(q.smallBizNetChange ?? 0))
-		);
-		const ceilAbs = Math.ceil(maxAbs / 100) * 100;
-		const minV = -ceilAbs;
-		const maxV = Math.max(100, Math.ceil(Math.max(0, ...flowQuarters.map((q) => q.netChange ?? 0)) / 100) * 100);
-		const span = maxV - minV;
-		const plotW = BAR_W - B_PAD.left - B_PAD.right;
-		const plotH = BAR_H - B_PAD.top - B_PAD.bottom;
-		const zeroY = B_PAD.top + (maxV / span) * plotH;
-		const colW = plotW / flowQuarters.length;
-		const barW = Math.max(10, Math.min(22, colW * 0.56));
-
-		const bars = flowQuarters.map((q, i) => {
-			const val = q.netChange ?? 0;
-			const cx = B_PAD.left + colW * (i + 0.5);
-			const yVal = B_PAD.top + ((maxV - val) / span) * plotH;
-			const y = Math.min(zeroY, yVal);
-			const h = Math.max(2, Math.abs(yVal - zeroY));
-			return { q, i, cx, x: cx - barW / 2, y, w: barW, h, val };
-		});
-
-		return { zeroY, minV, maxV, bars, plotH };
+	// Annual borough-level DOF net change (fewer empty = positive, more empty = negative) from bundled 349 clusters
+	const boroughAnnualFlows = $derived.by(() => {
+		const byBoro = new Map<string, Map<number, { total: number; vacant: number; occupied: number }>>();
+		for (const f of data.clustersData.clusters.features) {
+			const c = f.properties;
+			if (!byBoro.has(c.borough)) byBoro.set(c.borough, new Map());
+			const ym = byBoro.get(c.borough)!;
+			for (const h of c.history ?? []) {
+				const cur = ym.get(h.year) ?? { total: 0, vacant: 0, occupied: 0 };
+				cur.total += h.total;
+				cur.vacant += h.vacant;
+				cur.occupied += Math.max(0, h.total - h.vacant);
+				ym.set(h.year, cur);
+			}
+		}
+		const out: Record<
+			string,
+			Array<{
+				year: number;
+				prevYear: number;
+				label: string;
+				net: number; // prevVacant - currVacant (positive = fewer empty / net filled; negative = more empty)
+				vacant: number;
+				occupied: number;
+				total: number;
+				occDelta: number;
+			}>
+		> = {};
+		for (const [boro, ym] of byBoro.entries()) {
+			const yrs = [...ym.keys()].sort((a, b) => a - b);
+			const rows: (typeof out)[string] = [];
+			for (let i = 1; i < yrs.length; i++) {
+				const prev = ym.get(yrs[i - 1])!;
+				const cur = ym.get(yrs[i])!;
+				rows.push({
+					year: yrs[i],
+					prevYear: yrs[i - 1],
+					label: `'${String(yrs[i]).slice(-2)}`,
+					net: prev.vacant - cur.vacant,
+					vacant: cur.vacant,
+					occupied: cur.occupied,
+					total: cur.total,
+					occDelta: cur.occupied - prev.occupied
+				});
+			}
+			out[boro] = rows;
+		}
+		return out;
 	});
 
-	const activeFlow = $derived(
-		hoveredFlowIdx !== null && flowQuarters[hoveredFlowIdx]
-			? flowQuarters[hoveredFlowIdx]
-			: flowQuarters[flowQuarters.length - 1] ?? null
+	// Citywide quarterly flow rows adapted to selected segment (All | Small Biz | Chains)
+	const cityFlowRows = $derived.by(() => {
+		return flowQuarters.map((q) => {
+			const allOpen = q.openings ?? 0;
+			const allClose = q.closings ?? 0;
+			const allNet = q.netChange ?? 0;
+			const sbOpen = q.smallBizOpenings ?? 0;
+			const sbClose = q.smallBizClosings ?? 0;
+			const sbNet = q.smallBizNetChange ?? 0;
+
+			if (flowSegment === 'smallBiz') {
+				return { quarter: q.quarter, openings: sbOpen, closings: sbClose, net: sbNet, sbNet };
+			}
+			if (flowSegment === 'chains') {
+				return {
+					quarter: q.quarter,
+					openings: Math.max(0, allOpen - sbOpen),
+					closings: Math.max(0, allClose - sbClose),
+					net: allNet - sbNet,
+					sbNet
+				};
+			}
+			return { quarter: q.quarter, openings: allOpen, closings: allClose, net: allNet, sbNet };
+		});
+	});
+
+	const cityCumulativeNet = $derived(cityFlowRows.reduce((s, r) => s + r.net, 0));
+
+	const activeBoroRows = $derived(flowScope === 'Citywide' ? [] : boroughAnnualFlows[flowScope] ?? []);
+	const boroCumulativeNet = $derived(activeBoroRows.reduce((s, r) => s + r.net, 0));
+
+	const flowChart = $derived.by(() => {
+		const plotW = BAR_W - B_PAD.left - B_PAD.right;
+		const plotH = BAR_H - B_PAD.top - B_PAD.bottom;
+
+		if (flowScope !== 'Citywide') {
+			if (activeBoroRows.length === 0) return null;
+			const maxAbs = Math.max(25, ...activeBoroRows.map((r) => Math.abs(r.net)));
+			const step = maxAbs <= 60 ? 20 : maxAbs <= 200 ? 50 : 100;
+			const ceilAbs = Math.ceil(maxAbs / step) * step;
+			const minV = -ceilAbs;
+			const maxV = ceilAbs;
+			const span = maxV - minV;
+			const zeroY = B_PAD.top + (maxV / span) * plotH;
+			const colW = plotW / activeBoroRows.length;
+			const barW = Math.min(44, colW * 0.44);
+
+			const bars = activeBoroRows.map((r, i) => {
+				const cx = B_PAD.left + colW * (i + 0.5);
+				const yVal = B_PAD.top + ((maxV - r.net) / span) * plotH;
+				const y = Math.min(zeroY, yVal);
+				const h = Math.max(2, Math.abs(yVal - zeroY));
+				return {
+					kind: 'boro' as const,
+					key: String(r.year),
+					label: `${r.prevYear}→'${String(r.year).slice(-2)}`,
+					i,
+					cx,
+					x: cx - barW / 2,
+					y,
+					w: barW,
+					h,
+					val: r.net,
+					row: r
+				};
+			});
+			return { mode: 'boro' as const, zeroY, minV, maxV, bars, netPath: '' };
+		}
+
+		if (cityFlowRows.length === 0) return null;
+
+		if (flowMode === 'flow') {
+			const maxBar = Math.max(
+				200,
+				...cityFlowRows.map((r) => Math.max(r.openings, r.closings))
+			);
+			const step = maxBar <= 1000 ? 250 : 1000;
+			const ceilVal = Math.ceil(maxBar / step) * step;
+			const minV = -ceilVal;
+			const maxV = ceilVal;
+			const span = maxV - minV;
+			const zeroY = B_PAD.top + (maxV / span) * plotH;
+			const colW = plotW / cityFlowRows.length;
+			const barW = Math.max(10, Math.min(20, colW * 0.52));
+
+			const bars = cityFlowRows.map((r, i) => {
+				const cx = B_PAD.left + colW * (i + 0.5);
+				const yOpen = B_PAD.top + ((maxV - r.openings) / span) * plotH;
+				const yClose = B_PAD.top + ((maxV + r.closings) / span) * plotH;
+				const yNet = B_PAD.top + ((maxV - r.net) / span) * plotH;
+				return {
+					kind: 'flow' as const,
+					key: r.quarter,
+					label: r.quarter.replace(/^20/, "'"),
+					i,
+					cx,
+					x: cx - barW / 2,
+					w: barW,
+					openY: yOpen,
+					openH: Math.max(2, zeroY - yOpen),
+					closeY: zeroY,
+					closeH: Math.max(2, yClose - zeroY),
+					netY: yNet,
+					val: r.net,
+					row: r
+				};
+			});
+			const netPath = bars
+				.map((b, i) => `${i === 0 ? 'M' : 'L'}${b.cx.toFixed(1)},${b.netY.toFixed(1)}`)
+				.join(' ');
+			return { mode: 'flow' as const, zeroY, minV, maxV, bars, netPath };
+		}
+
+		const maxNeg = Math.max(50, ...cityFlowRows.map((r) => (r.net < 0 ? Math.abs(r.net) : 0)));
+		const maxPos = Math.max(0, ...cityFlowRows.map((r) => (r.net > 0 ? r.net : 0)));
+		const step = Math.max(maxNeg, maxPos) <= 150 ? 50 : 100;
+		const minV = -Math.ceil(maxNeg / step) * step;
+		const maxV = Math.max(step, Math.ceil(maxPos / step) * step);
+		const span = maxV - minV;
+		const zeroY = B_PAD.top + (maxV / span) * plotH;
+		const colW = plotW / cityFlowRows.length;
+		const barW = Math.max(10, Math.min(22, colW * 0.56));
+
+		const bars = cityFlowRows.map((r, i) => {
+			const cx = B_PAD.left + colW * (i + 0.5);
+			const yVal = B_PAD.top + ((maxV - r.net) / span) * plotH;
+			const y = Math.min(zeroY, yVal);
+			const h = Math.max(2, Math.abs(yVal - zeroY));
+			return {
+				kind: 'net' as const,
+				key: r.quarter,
+				label: r.quarter.replace(/^20/, "'"),
+				i,
+				cx,
+				x: cx - barW / 2,
+				y,
+				w: barW,
+				h,
+				val: r.net,
+				row: r
+			};
+		});
+
+		return { mode: 'net' as const, zeroY, minV, maxV, bars, netPath: '' };
+	});
+
+	const activeCityFlow = $derived(
+		hoveredFlowIdx !== null && cityFlowRows[hoveredFlowIdx]
+			? cityFlowRows[hoveredFlowIdx]
+			: cityFlowRows[cityFlowRows.length - 1] ?? null
+	);
+
+	const activeBoroFlow = $derived(
+		hoveredFlowIdx !== null && activeBoroRows[hoveredFlowIdx]
+			? activeBoroRows[hoveredFlowIdx]
+			: activeBoroRows[activeBoroRows.length - 1] ?? null
 	);
 
 	// Biggest cluster movers: 1-Yr (2024->25) vs 4-Yr (2021->25)
@@ -143,17 +326,19 @@
 
 	const clusterMovers = $derived.by(() => {
 		const scored: Array<{ c: ClusterProps; delta: number; baseRate: number }> = [];
+		const minSf = flowScope === 'Staten Island' ? 20 : flowScope === 'Citywide' ? 45 : 30;
 		for (const f of data.clustersData.clusters.features) {
 			const c = f.properties;
-			if (c.total_storefronts < 45) continue;
+			if (flowScope !== 'Citywide' && c.borough !== flowScope) continue;
+			if (c.total_storefronts < minSf) continue;
 			if (moversSpan === '1yr') {
 				const h24 = c.history?.find((h) => h.year === 2024);
-				if (c.yoy_change !== null && c.yoy_change !== undefined && h24 && h24.total >= 20) {
+				if (c.yoy_change !== null && c.yoy_change !== undefined && h24 && h24.total >= 15) {
 					scored.push({ c, delta: c.yoy_change, baseRate: h24.rate });
 				}
 			} else {
 				const h21 = c.history?.find((h) => h.year === 2021);
-				if (h21 && h21.total >= 20) {
+				if (h21 && h21.total >= 15) {
 					scored.push({
 						c,
 						delta: Math.round((c.vacancy_rate - h21.rate) * 10000) / 10000,
@@ -401,30 +586,132 @@
 					{/if}
 				</article>
 
-				<!-- Right: Quarterly Net Storefront Change -->
+				<!-- Right: Storefront Change (Citywide Quarterly Openings/Closings + Borough Annual DOF) -->
 				<article class="chart-card surface">
 					<div class="chart-head">
 						<div>
-							<span class="kicker">Openings Minus Closings</span>
-							<h2>Quarterly Net Storefront Change</h2>
+							<span class="kicker">
+								{#if flowScope === 'Citywide'}
+									{flowMode === 'flow' ? 'Quarterly Openings vs. Closings' : 'Openings Minus Closings'} · Comptroller
+								{:else}
+									Annual Empty Storefront Swing · {flowScope} DOF
+								{/if}
+							</span>
+							<h2>
+								{flowScope === 'Citywide' ? 'Quarterly Net Storefront Change' : `${flowScope} Annual Net Change`}
+							</h2>
 						</div>
-						{#if activeFlow}
+						{#if flowScope === 'Citywide' && activeCityFlow}
 							<div class="chart-readout">
-								<span class="cr-q">{activeFlow.quarter}</span>
-								<b class={activeFlow.netChange !== null && activeFlow.netChange < 0 ? 'worse' : 'better'}>
-									{signedNum(activeFlow.netChange)}
+								<span class="cr-q">{activeCityFlow.quarter}</span>
+								<b class={activeCityFlow.net < 0 ? 'worse' : 'better'}>
+									{signedNum(activeCityFlow.net)}
+								</b>
+							</div>
+						{:else if flowScope !== 'Citywide' && activeBoroFlow}
+							<div class="chart-readout">
+								<span class="cr-q">{activeBoroFlow.prevYear}→{activeBoroFlow.year}</span>
+								<b class={activeBoroFlow.net < 0 ? 'worse' : 'better'}>
+									{signedNum(activeBoroFlow.net)}
 								</b>
 							</div>
 						{/if}
 					</div>
 
-					{#if activeFlow}
+					<!-- Scope pills (Citywide + 5 Boroughs) -->
+					<div class="flow-controls">
+						<div class="flow-scope-pills" role="group" aria-label="Geography scope">
+							{#each FLOW_SCOPES as sc}
+								<button
+									type="button"
+									class="fscope-pill"
+									class:on={flowScope === sc}
+									onclick={() => {
+										flowScope = sc;
+										hoveredFlowIdx = null;
+									}}
+								>
+									{sc === 'Staten Island' ? 'S.I.' : sc}
+								</button>
+							{/each}
+						</div>
+
+						{#if flowScope === 'Citywide'}
+							<div class="flow-sub-controls">
+								<div class="mini-seg" role="group" aria-label="Chart display mode">
+									<button
+										type="button"
+										class:active={flowMode === 'net'}
+										onclick={() => (flowMode = 'net')}
+									>
+										Net
+									</button>
+									<button
+										type="button"
+										class:active={flowMode === 'flow'}
+										onclick={() => (flowMode = 'flow')}
+									>
+										Open vs. Closed
+									</button>
+								</div>
+								<div class="mini-seg" role="group" aria-label="Business size">
+									<button
+										type="button"
+										class:active={flowSegment === 'all'}
+										onclick={() => (flowSegment = 'all')}
+									>
+										All
+									</button>
+									<button
+										type="button"
+										class:active={flowSegment === 'smallBiz'}
+										onclick={() => (flowSegment = 'smallBiz')}
+									>
+										Small Biz
+									</button>
+									<button
+										type="button"
+										class:active={flowSegment === 'chains'}
+										onclick={() => (flowSegment = 'chains')}
+									>
+										Chains
+									</button>
+								</div>
+							</div>
+						{/if}
+					</div>
+
+					{#if flowScope === 'Citywide' && activeCityFlow}
 						<div class="flow-summary-line">
-							<span><b>{numFmt(activeFlow.openings)}</b> opened</span>
+							<span><b class="better">+{numFmt(activeCityFlow.openings)}</b> opened</span>
 							<span class="dot">·</span>
-							<span><b>{numFmt(activeFlow.closings)}</b> closed</span>
+							<span><b class="worse">-{numFmt(activeCityFlow.closings)}</b> closed</span>
 							<span class="dot">·</span>
-							<span>Small biz net: <b class={activeFlow.smallBizNetChange !== null && activeFlow.smallBizNetChange < 0 ? 'worse' : 'better'}>{signedNum(activeFlow.smallBizNetChange)}</b></span>
+							<span>
+								{cityFlowRows.length}Q cumulative:
+								<b class={cityCumulativeNet < 0 ? 'worse' : 'better'}>
+									{signedNum(cityCumulativeNet)}
+								</b>
+							</span>
+						</div>
+					{:else if flowScope !== 'Citywide' && activeBoroFlow}
+						<div class="flow-summary-line">
+							<span>
+								<b class={activeBoroFlow.net < 0 ? 'worse' : 'better'}>
+									{activeBoroFlow.net < 0
+										? `+${numFmt(Math.abs(activeBoroFlow.net))} more empty`
+										: `${numFmt(activeBoroFlow.net)} fewer empty`}
+								</b>
+							</span>
+							<span class="dot">·</span>
+							<span><b>{numFmt(activeBoroFlow.vacant)}</b> vacant of {numFmt(activeBoroFlow.total)}</span>
+							<span class="dot">·</span>
+							<span>
+								2021→25 net:
+								<b class={boroCumulativeNet < 0 ? 'worse' : 'better'}>
+									{signedNum(boroCumulativeNet)}
+								</b>
+							</span>
 						</div>
 					{/if}
 
@@ -433,9 +720,31 @@
 							viewBox="0 0 {BAR_W} {BAR_H}"
 							class="chart-svg"
 							role="img"
-							aria-label="Quarterly net storefront change bars"
+							aria-label="Storefront net change chart"
 							onmouseleave={() => (hoveredFlowIdx = null)}
 						>
+							<!-- Top positive reference label when relevant -->
+							{#if flowChart.maxV > 0}
+								<line
+									x1={B_PAD.left}
+									y1={B_PAD.top}
+									x2={BAR_W - B_PAD.right}
+									y2={B_PAD.top}
+									stroke="#ecece7"
+									stroke-width="1"
+								/>
+								<text
+									x={B_PAD.left - 7}
+									y={B_PAD.top + 3.5}
+									text-anchor="end"
+									font-size="9.5"
+									fill="#8c8c86"
+									font-family="JetBrains Mono, ui-monospace, monospace"
+								>
+									+{numFmt(flowChart.maxV)}
+								</text>
+							{/if}
+
 							<!-- Zero baseline -->
 							<line
 								x1={B_PAD.left}
@@ -456,6 +765,14 @@
 							>
 								0
 							</text>
+							<line
+								x1={B_PAD.left}
+								y1={BAR_H - B_PAD.bottom}
+								x2={BAR_W - B_PAD.right}
+								y2={BAR_H - B_PAD.bottom}
+								stroke="#ecece7"
+								stroke-width="1"
+							/>
 							<text
 								x={B_PAD.left - 7}
 								y={BAR_H - B_PAD.bottom + 3}
@@ -464,70 +781,151 @@
 								fill="#8c8c86"
 								font-family="JetBrains Mono, ui-monospace, monospace"
 							>
-								{flowChart.minV}
+								{flowChart.minV < 0 ? `-${numFmt(Math.abs(flowChart.minV))}` : flowChart.minV}
 							</text>
 
-							{#each flowChart.bars as b (b.q.quarter)}
-								{@const isHot = hoveredFlowIdx === b.i || (hoveredFlowIdx === null && b.i === flowChart.bars.length - 1)}
-								<rect
-									x={b.x}
-									y={b.y}
-									width={b.w}
-									height={b.h}
-									rx="2.5"
-									fill={b.val < 0 ? (isHot ? '#b42318' : '#e07a6e') : (isHot ? '#0e6e48' : '#58a883')}
+							{#if flowChart.mode === 'flow'}
+								{#each flowChart.bars as b (b.key)}
+									{@const isHot = hoveredFlowIdx === b.i || (hoveredFlowIdx === null && b.i === flowChart.bars.length - 1)}
+									<!-- Green upward openings bar -->
+									<rect
+										x={b.x}
+										y={b.openY}
+										width={b.w}
+										height={b.openH}
+										rx="2"
+										fill={isHot ? '#0e6e48' : '#7ec2a3'}
+									/>
+									<!-- Red downward closings bar -->
+									<rect
+										x={b.x}
+										y={b.closeY}
+										width={b.w}
+										height={b.closeH}
+										rx="2"
+										fill={isHot ? '#b42318' : '#e6948a'}
+									/>
+									{#if b.i === 0 || b.i === flowChart.bars.length - 1 || b.i % 3 === 0}
+										<text
+											x={b.cx}
+											y={BAR_H - 7}
+											text-anchor="middle"
+											font-size="9.5"
+											fill="#8c8c86"
+											font-family="JetBrains Mono, ui-monospace, monospace"
+										>
+											{b.label}
+										</text>
+									{/if}
+									<rect
+										x={b.cx - 18}
+										y={B_PAD.top}
+										width="36"
+										height={BAR_H - B_PAD.top - B_PAD.bottom}
+										fill="transparent"
+										role="presentation"
+										onmouseenter={() => (hoveredFlowIdx = b.i)}
+									/>
+								{/each}
+								<!-- Net change dark overlay line & active dot -->
+								<path
+									d={flowChart.netPath}
+									fill="none"
+									stroke="#111111"
+									stroke-width="1.6"
+									stroke-linecap="round"
+									stroke-linejoin="round"
 								/>
-								{#if isHot}
-									<text
-										x={b.cx}
-										y={b.val < 0 ? b.y + b.h + 11 : b.y - 5}
-										text-anchor="middle"
-										font-size="9.5"
-										font-weight="600"
-										fill={b.val < 0 ? '#b42318' : '#0e6e48'}
-										font-family="JetBrains Mono, ui-monospace, monospace"
-									>
-										{signedNum(b.val)}
-									</text>
-								{/if}
-								{#if b.i === 0 || b.i === flowChart.bars.length - 1 || b.i % 3 === 0}
-									<text
-										x={b.cx}
-										y={BAR_H - 7}
-										text-anchor="middle"
-										font-size="9.5"
-										fill="#8c8c86"
-										font-family="JetBrains Mono, ui-monospace, monospace"
-									>
-										{b.q.quarter.replace(/^20/, "'")}
-									</text>
-								{/if}
-								<rect
-									x={b.cx - 18}
-									y={B_PAD.top}
-									width="36"
-									height={BAR_H - B_PAD.top - B_PAD.bottom}
-									fill="transparent"
-									role="presentation"
-									onmouseenter={() => (hoveredFlowIdx = b.i)}
-								/>
-							{/each}
+								{#each flowChart.bars as b (b.key)}
+									{@const isHot = hoveredFlowIdx === b.i || (hoveredFlowIdx === null && b.i === flowChart.bars.length - 1)}
+									<circle
+										cx={b.cx}
+										cy={b.netY}
+										r={isHot ? 3.2 : 2}
+										fill="#111111"
+										stroke="#ffffff"
+										stroke-width="1"
+									/>
+								{/each}
+							{:else}
+								{#each flowChart.bars as b (b.key)}
+									{@const isHot = hoveredFlowIdx === b.i || (hoveredFlowIdx === null && b.i === flowChart.bars.length - 1)}
+									<rect
+										x={b.x}
+										y={b.y}
+										width={b.w}
+										height={b.h}
+										rx="2.5"
+										fill={b.val < 0 ? (isHot ? '#b42318' : '#e07a6e') : (isHot ? '#0e6e48' : '#58a883')}
+									/>
+									{#if isHot || flowChart.mode === 'boro'}
+										<text
+											x={b.cx}
+											y={b.val < 0 ? b.y + b.h + 11 : b.y - 5}
+											text-anchor="middle"
+											font-size="9.5"
+											font-weight={isHot ? '700' : '500'}
+											fill={b.val < 0 ? '#b42318' : '#0e6e48'}
+											font-family="JetBrains Mono, ui-monospace, monospace"
+										>
+											{signedNum(b.val)}
+										</text>
+									{/if}
+									{#if flowChart.mode === 'boro' || b.i === 0 || b.i === flowChart.bars.length - 1 || b.i % 3 === 0}
+										<text
+											x={b.cx}
+											y={BAR_H - 7}
+											text-anchor="middle"
+											font-size="9.5"
+											fill="#8c8c86"
+											font-family="JetBrains Mono, ui-monospace, monospace"
+										>
+											{b.label}
+										</text>
+									{/if}
+									<rect
+										x={b.cx - (flowChart.mode === 'boro' ? 42 : 18)}
+										y={B_PAD.top}
+										width={flowChart.mode === 'boro' ? 84 : 36}
+										height={BAR_H - B_PAD.top - B_PAD.bottom}
+										fill="transparent"
+										role="presentation"
+										onmouseenter={() => (hoveredFlowIdx = b.i)}
+									/>
+								{/each}
+							{/if}
 						</svg>
 					{/if}
 				</article>
 			</section>
 		{/if}
 
-		<!-- 3. Biggest Cluster Movers: Improving vs Worsening -->
+		<!-- 3. Biggest Cluster Movers: Improving vs Worsening (cross-filtered by selected borough!) -->
 		<section class="movers-section surface">
 			<div class="section-head">
 				<div>
 					<span class="kicker">
-						NYC DOF Tax Filings · {moversSpan === '1yr' ? '2024 → 2025' : '2021 → 2025'} (45+ Storefront Clusters)
+						NYC DOF Tax Filings · {moversSpan === '1yr' ? '2024 → 2025' : '2021 → 2025'} · {flowScope === 'Citywide' ? '45+ Storefront Clusters' : `${flowScope} Clusters`}
 					</span>
-					<h2>Biggest Cluster Movers</h2>
+					<h2>
+						{flowScope === 'Citywide' ? 'Biggest Cluster Movers' : `Biggest ${flowScope} Movers`}
+					</h2>
 				</div>
-				<div class="seg-tabs" role="group" aria-label="Trend timeframe">
+				<div class="movers-controls">
+					{#if flowScope !== 'Citywide'}
+						<button
+							type="button"
+							class="boro-clear-pill"
+							onclick={() => {
+								flowScope = 'Citywide';
+								hoveredFlowIdx = null;
+							}}
+							title="Show movers across all 5 boroughs"
+						>
+							{flowScope} ×
+						</button>
+					{/if}
+					<div class="seg-tabs" role="group" aria-label="Trend timeframe">
 					<button
 						type="button"
 						class:active={moversSpan === '1yr'}
@@ -542,6 +940,7 @@
 					>
 						4-Yr (2021→25)
 					</button>
+				</div>
 				</div>
 			</div>
 
@@ -829,14 +1228,89 @@
 		font-weight: 600;
 	}
 
-	.flow-summary-line {
-		font-size: 12px;
-		color: var(--muted);
+	.flow-controls {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.flow-scope-pills {
 		display: flex;
 		flex-wrap: wrap;
+		gap: 4px;
+	}
+
+	.fscope-pill {
+		padding: 2.5px 7px;
+		border-radius: 4px;
+		border: 1px solid var(--rule);
+		background: var(--page);
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		font-weight: 500;
+		color: var(--muted);
+		cursor: pointer;
+		transition: border-color 0.1s ease, background 0.1s ease, color 0.1s ease;
+	}
+
+	.fscope-pill:hover {
+		color: var(--ink);
+		border-color: var(--line);
+	}
+
+	.fscope-pill.on {
+		background: var(--ink);
+		border-color: var(--ink);
+		color: #ffffff;
+	}
+
+	.flow-sub-controls {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+
+	.mini-seg {
+		display: inline-flex;
+		padding: 2px;
+		gap: 2px;
+		background: var(--quiet);
+		border-radius: 5px;
+	}
+
+	.mini-seg button {
+		border: 0;
+		background: transparent;
+		padding: 2.5px 7px;
+		border-radius: 3.5px;
+		font-family: var(--font-mono);
+		font-size: 10px;
+		font-weight: 500;
+		color: var(--muted);
+		cursor: pointer;
+	}
+
+	.mini-seg button.active {
+		background: var(--panel);
+		color: var(--ink);
+		font-weight: 600;
+		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+	}
+
+	.flow-summary-line {
+		font-size: 11.5px;
+		font-variant-numeric: tabular-nums;
+		color: var(--muted);
+		display: flex;
+		flex-wrap: nowrap;
 		gap: 6px;
 		align-items: center;
-		min-height: 24px;
+		min-height: 20px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.flow-summary-line b {
@@ -871,6 +1345,29 @@
 		justify-content: space-between;
 		gap: 12px;
 		flex-wrap: wrap;
+	}
+
+	.movers-controls {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.boro-clear-pill {
+		border: 1px solid var(--ink);
+		background: var(--ink);
+		color: #ffffff;
+		padding: 4px 9px;
+		border-radius: 5px;
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.boro-clear-pill:hover {
+		opacity: 0.85;
 	}
 
 	.seg-tabs {

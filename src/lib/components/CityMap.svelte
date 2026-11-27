@@ -27,9 +27,90 @@
 	let mapContainer: HTMLDivElement;
 	let map: maplibregl.Map | null = null;
 	let hovered = $state<ClusterProps | null>(null);
-	let colorMode = $state<MapColorMode>('vacancy');
+	type TrendFilter = 'all' | 'improving' | 'worsening' | 'stuck';
+
+	let colorMode = $state<MapColorMode>('trend');
+	let trendFilter = $state<TrendFilter>('all');
 	let activeBorough = $state<string>('NYC');
 	let edgeMarkers: maplibregl.Marker[] = [];
+	let previewTimer: ReturnType<typeof setTimeout> | null = null;
+	let previewingChipId = $state<string | null>(null);
+
+	function shortClusterLabel(name: string): string {
+		return name
+			.split(':')[0]
+			.replace(/\s*\([^)]*\)\s*/g, ' ')
+			.replace(/\s+/g, ' ')
+			.trim();
+	}
+
+	function previewStarterCluster(c: ClusterProps) {
+		if (!map) return;
+		if (previewTimer) clearTimeout(previewTimer);
+		previewingChipId = c.id;
+		setSpotlight(c.id);
+		renderEdgeLabels(c);
+		previewTimer = setTimeout(() => {
+			if (!map || previewingChipId !== c.id) return;
+			map.easeTo({
+				center: c.center,
+				zoom: Math.max(map.getZoom(), 12.6),
+				duration: 460,
+				essential: true
+			});
+		}, 180);
+	}
+
+	function clearStarterPreview() {
+		if (previewTimer) {
+			clearTimeout(previewTimer);
+			previewTimer = null;
+		}
+		if (previewingChipId) {
+			previewingChipId = null;
+			if (!hovered) {
+				setSpotlight(null);
+				clearEdgeMarkers();
+			}
+		}
+	}
+
+	const trendBreakdown = $derived.by(() => {
+		let improving = 0;
+		let worsening = 0;
+		let stuck = 0;
+		for (const f of clustersData.clusters.features) {
+			const c = f.properties;
+			const yoy = c.yoy_change ?? 0;
+			if (yoy <= -0.015) improving++;
+			else if (yoy >= 0.015) worsening++;
+			else if (c.vacancy_rate >= 0.16) stuck++;
+		}
+		return { improving, worsening, stuck };
+	});
+
+	function registerChronicHatch(m: maplibregl.Map) {
+		if (m.hasImage('chronic-hatch')) return;
+		const size = 16;
+		const canvas = document.createElement('canvas');
+		canvas.width = size;
+		canvas.height = size;
+		const ctx = canvas.getContext('2d');
+		if (!ctx) return;
+		ctx.fillStyle = 'rgba(140, 20, 32, 0.06)';
+		ctx.fillRect(0, 0, size, size);
+		ctx.strokeStyle = 'rgba(140, 20, 32, 0.42)';
+		ctx.lineWidth = 2;
+		// Draw seamless 45-degree repeating stripes across tile boundaries
+		for (const offset of [-size, 0, size]) {
+			ctx.beginPath();
+			ctx.moveTo(offset, size);
+			ctx.lineTo(offset + size, 0);
+			ctx.stroke();
+		}
+		const imgData = ctx.getImageData(0, 0, size, size);
+		m.addImage('chronic-hatch', { width: size, height: size, data: imgData.data }, { pixelRatio: 2 });
+	}
 
 	const BOROUGH_VIEWS: Array<{ key: string; label: string; center: [number, number]; zoom: number }> = [
 		{ key: 'NYC', label: 'All', center: [-73.988, 40.74], zoom: 12.1 },
@@ -53,18 +134,43 @@
 			.filter((c) => c.total_storefronts >= 65);
 		const hardest = [...big].sort((a, b) => b.vacancy_rate - a.vacancy_rate)[0];
 		const rebound = [...big]
-			.filter((c) => typeof c.yoy_change === 'number' && c.yoy_change < -0.02)
+			.filter((c) => typeof c.yoy_change === 'number' && c.yoy_change < -0.02 && c.id !== hardest?.id)
 			.sort((a, b) => (a.yoy_change ?? 0) - (b.yoy_change ?? 0))[0];
 		const worsening = [...big]
-			.filter((c) => typeof c.yoy_change === 'number' && c.yoy_change > 0.02)
+			.filter(
+				(c) =>
+					typeof c.yoy_change === 'number' &&
+					c.yoy_change > 0.02 &&
+					c.id !== hardest?.id &&
+					c.id !== rebound?.id
+			)
 			.sort((a, b) => (b.yoy_change ?? 0) - (a.yoy_change ?? 0))[0];
 
-		const items: Array<{ label: string; tone: 'hot' | 'better' | 'worse'; c: ClusterProps }> = [];
-		if (hardest) items.push({ label: 'Most empty', tone: 'hot', c: hardest });
-		if (rebound && rebound.id !== hardest?.id)
-			items.push({ label: 'Biggest rebound', tone: 'better', c: rebound });
-		if (worsening && worsening.id !== hardest?.id && worsening.id !== rebound?.id)
-			items.push({ label: 'Fastest rising', tone: 'worse', c: worsening });
+		const items: Array<{ label: string; stat: string; tone: 'hot' | 'better' | 'worse'; c: ClusterProps }> = [];
+		if (hardest) {
+			items.push({
+				label: 'Most empty',
+				stat: pct(hardest.vacancy_rate, 0),
+				tone: 'hot',
+				c: hardest
+			});
+		}
+		if (rebound) {
+			items.push({
+				label: 'Rebound',
+				stat: deltaPts(rebound.yoy_change, 1),
+				tone: 'better',
+				c: rebound
+			});
+		}
+		if (worsening) {
+			items.push({
+				label: 'Fastest rising',
+				stat: deltaPts(worsening.yoy_change, 1),
+				tone: 'worse',
+				c: worsening
+			});
+		}
 		return items;
 	});
 
@@ -178,22 +284,137 @@
 		}
 	}
 
+	function applyTrendLens(filter: TrendFilter) {
+		if (!map || !map.getLayer('clusters-fill')) return;
+		if (colorMode !== 'trend' || filter === 'all') {
+			map.setPaintProperty(
+				'clusters-fill',
+				'fill-opacity',
+				colorMode === 'trend' ? TREND_OPACITY_EXPR : VACANCY_OPACITY_EXPR
+			);
+			if (map.getLayer('clusters-chronic-hatch') && colorMode === 'trend') {
+				map.setPaintProperty('clusters-chronic-hatch', 'fill-opacity', 0.85);
+			}
+			map.setPaintProperty('clusters-outline', 'line-color', 'rgba(17, 17, 17, 0.24)');
+			map.setPaintProperty('clusters-outline', 'line-width', 0.85);
+			return;
+		}
+
+		if (filter === 'improving') {
+			map.setPaintProperty('clusters-fill', 'fill-opacity', [
+				'step',
+				['coalesce', ['get', 'yoy_change'], 0],
+				0.54,
+				-0.04,
+				0.34,
+				-0.015,
+				0.0
+			]);
+			if (map.getLayer('clusters-chronic-hatch')) {
+				map.setPaintProperty('clusters-chronic-hatch', 'fill-opacity', 0.08);
+			}
+			map.setPaintProperty('clusters-outline', 'line-color', [
+				'case',
+				['<=', ['coalesce', ['get', 'yoy_change'], 0], -0.015],
+				'rgba(14, 110, 72, 0.65)',
+				'rgba(17, 17, 17, 0.10)'
+			]);
+			map.setPaintProperty('clusters-outline', 'line-width', [
+				'case',
+				['<=', ['coalesce', ['get', 'yoy_change'], 0], -0.015],
+				1.3,
+				0.65
+			]);
+		} else if (filter === 'worsening') {
+			map.setPaintProperty('clusters-fill', 'fill-opacity', [
+				'step',
+				['coalesce', ['get', 'yoy_change'], 0],
+				0.0,
+				0.015,
+				0.34,
+				0.04,
+				0.56
+			]);
+			if (map.getLayer('clusters-chronic-hatch')) {
+				map.setPaintProperty('clusters-chronic-hatch', 'fill-opacity', 0.08);
+			}
+			map.setPaintProperty('clusters-outline', 'line-color', [
+				'case',
+				['>=', ['coalesce', ['get', 'yoy_change'], 0], 0.015],
+				'rgba(180, 35, 24, 0.62)',
+				'rgba(17, 17, 17, 0.10)'
+			]);
+			map.setPaintProperty('clusters-outline', 'line-width', [
+				'case',
+				['>=', ['coalesce', ['get', 'yoy_change'], 0], 0.015],
+				1.3,
+				0.65
+			]);
+		} else if (filter === 'stuck') {
+			map.setPaintProperty('clusters-fill', 'fill-opacity', 0.0);
+			if (map.getLayer('clusters-chronic-hatch')) {
+				map.setPaintProperty('clusters-chronic-hatch', 'fill-opacity', 1.0);
+			}
+			map.setPaintProperty('clusters-outline', 'line-color', [
+				'case',
+				[
+					'all',
+					['>=', ['coalesce', ['get', 'vacancy_rate'], 0], 0.16],
+					['>', ['coalesce', ['get', 'yoy_change'], 0], -0.015],
+					['<', ['coalesce', ['get', 'yoy_change'], 0], 0.015]
+				],
+				'rgba(140, 20, 32, 0.85)',
+				'rgba(17, 17, 17, 0.09)'
+			]);
+			map.setPaintProperty('clusters-outline', 'line-width', [
+				'case',
+				[
+					'all',
+					['>=', ['coalesce', ['get', 'vacancy_rate'], 0], 0.16],
+					['>', ['coalesce', ['get', 'yoy_change'], 0], -0.015],
+					['<', ['coalesce', ['get', 'yoy_change'], 0], 0.015]
+				],
+				1.6,
+				0.65
+			]);
+		}
+	}
+
+	function toggleTrendFilter(next: Exclude<TrendFilter, 'all'>) {
+		trendFilter = trendFilter === next ? 'all' : next;
+		if (!hovered && !previewingChipId) {
+			applyTrendLens(trendFilter);
+		}
+	}
+
 	function applyMapColorMode(mode: MapColorMode, activeId: string | null = hovered?.id ?? null) {
 		if (!map || !map.getLayer('clusters-fill')) return;
+		if (mode !== 'trend') trendFilter = 'all';
 		map.setPaintProperty(
 			'clusters-fill',
 			'fill-color',
 			mode === 'trend' ? TREND_COLOR_EXPR : VACANCY_COLOR_EXPR
 		);
-		map.setPaintProperty(
-			'clusters-fill',
-			'fill-opacity',
-			activeId
-				? spotlightOpacityExpr(activeId, mode)
-				: mode === 'trend'
-					? TREND_OPACITY_EXPR
-					: VACANCY_OPACITY_EXPR
-		);
+		if (map.getLayer('clusters-chronic-hatch')) {
+			map.setLayoutProperty(
+				'clusters-chronic-hatch',
+				'visibility',
+				mode === 'trend' ? 'visible' : 'none'
+			);
+		}
+		if (activeId) {
+			map.setPaintProperty('clusters-fill', 'fill-opacity', spotlightOpacityExpr(activeId, mode));
+			if (map.getLayer('clusters-chronic-hatch') && mode === 'trend') {
+				map.setPaintProperty('clusters-chronic-hatch', 'fill-opacity', [
+					'case',
+					['==', ['get', 'id'], activeId],
+					1.0,
+					0.35
+				]);
+			}
+		} else {
+			applyTrendLens(trendFilter);
+		}
 	}
 
 	function setColorMode(mode: MapColorMode) {
@@ -205,6 +426,14 @@
 		if (!map || !map.getLayer('clusters-fill')) return;
 		if (activeId) {
 			map.setPaintProperty('clusters-fill', 'fill-opacity', spotlightOpacityExpr(activeId, colorMode));
+			if (map.getLayer('clusters-chronic-hatch') && colorMode === 'trend') {
+				map.setPaintProperty('clusters-chronic-hatch', 'fill-opacity', [
+					'case',
+					['==', ['get', 'id'], activeId],
+					1.0,
+					0.35
+				]);
+			}
 			map.setPaintProperty('clusters-outline', 'line-color', [
 				'case',
 				['==', ['get', 'id'], activeId],
@@ -219,14 +448,8 @@
 			]);
 			map.setFilter('clusters-hover-casing', ['==', ['get', 'id'], activeId]);
 		} else {
-			map.setPaintProperty(
-				'clusters-fill',
-				'fill-opacity',
-				colorMode === 'trend' ? TREND_OPACITY_EXPR : VACANCY_OPACITY_EXPR
-			);
-			map.setPaintProperty('clusters-outline', 'line-color', 'rgba(17, 17, 17, 0.24)');
-			map.setPaintProperty('clusters-outline', 'line-width', 0.85);
 			map.setFilter('clusters-hover-casing', ['==', ['get', 'id'], '__none__']);
+			applyTrendLens(trendFilter);
 		}
 	}
 
@@ -246,6 +469,7 @@
 		map.on('load', () => {
 			if (!map) return;
 			const { underRoadsId, underLabelsId } = prepareStreetGridBasemap(map);
+			registerChronicHatch(map);
 
 			map.addSource('clusters', {
 				type: 'geojson',
@@ -259,8 +483,32 @@
 					type: 'fill',
 					source: 'clusters',
 					paint: {
-						'fill-color': VACANCY_COLOR_EXPR,
-						'fill-opacity': VACANCY_OPACITY_EXPR
+						'fill-color': colorMode === 'trend' ? TREND_COLOR_EXPR : VACANCY_COLOR_EXPR,
+						'fill-opacity': colorMode === 'trend' ? TREND_OPACITY_EXPR : VACANCY_OPACITY_EXPR
+					}
+				},
+				underRoadsId
+			);
+
+			// Diagonal plum hatching for chronically vacant clusters (>=16% empty) that are flat YoY
+			// so high-vacancy corridors like Midtown 5th Ave or FiDi never look "healthy/clear" in 1-Yr Trend mode
+			map.addLayer(
+				{
+					id: 'clusters-chronic-hatch',
+					type: 'fill',
+					source: 'clusters',
+					filter: [
+						'all',
+						['>=', ['coalesce', ['get', 'vacancy_rate'], 0], 0.16],
+						['>', ['coalesce', ['get', 'yoy_change'], 0], -0.015],
+						['<', ['coalesce', ['get', 'yoy_change'], 0], 0.015]
+					],
+					layout: {
+						visibility: colorMode === 'trend' ? 'visible' : 'none'
+					},
+					paint: {
+						'fill-pattern': 'chronic-hatch',
+						'fill-opacity': 0.85
 					}
 				},
 				underRoadsId
@@ -340,6 +588,7 @@
 	});
 
 	onDestroy(() => {
+		if (previewTimer) clearTimeout(previewTimer);
 		clearEdgeMarkers();
 		map?.remove();
 	});
@@ -360,8 +609,9 @@
 						{pct(hovered.vacancy_rate, 1)}
 					</div>
 					{#if hovered.yoy_change !== null && hovered.yoy_change !== undefined}
-						<span class="ro-delta {deltaTone(hovered.yoy_change, 0.01)}">
-							{deltaPts(hovered.yoy_change, 1)} YoY
+						{@const isStuck = hovered.vacancy_rate >= 0.16 && Math.abs(hovered.yoy_change) < 0.015}
+						<span class="ro-delta {isStuck ? 'stuck' : deltaTone(hovered.yoy_change, 0.01)}">
+							{isStuck ? 'Stuck high' : `${deltaPts(hovered.yoy_change, 1)} YoY`}
 						</span>
 					{/if}
 				</div>
@@ -427,7 +677,7 @@
 				{@const hl = comptroller.headline}
 				<div class="pulse-top">
 					<div>
-						<span class="ro-borough">NYC CITYWIDE · {hl.quarter} (COMPTROLLER)</span>
+						<span class="ro-borough">NYC STOREFRONTS · {hl.quarter}</span>
 						<div class="pulse-headline">
 							<strong class="pulse-rate">{pct(hl.vacancyRate, 2)}</strong>
 							<span class="pulse-delta {deltaTone(hl.rateChange, 0.0002)}">
@@ -454,28 +704,67 @@
 					<span class="flow-net {hl.netChange !== null && hl.netChange < 0 ? 'worse' : 'better'}">
 						<b>{signedNum(hl.netChange)}</b> net
 					</span>
-					{#if hl.smallBizNetChange !== null}
-						<span class="flow-sb">({signedNum(hl.smallBizNetChange)} small biz)</span>
-					{/if}
 				</div>
 
 				{#if starterClusters.length > 0}
 					<div class="starter-row" aria-label="Notable clusters to explore">
-						{#each starterClusters as item}
+						{#each starterClusters as item (item.c.id)}
 							<a
 								href="/cluster/{item.c.id}"
 								class="starter-chip tone-{item.tone}"
-								title="{item.c.name} ({pct(item.c.vacancy_rate, 1)})"
+								class:previewing={previewingChipId === item.c.id}
+								title="{item.c.name} ({pct(item.c.vacancy_rate, 1)} empty · {deltaPts(item.c.yoy_change, 1)} YoY)"
+								onmouseenter={() => previewStarterCluster(item.c)}
+								onmouseleave={clearStarterPreview}
+								onfocus={() => previewStarterCluster(item.c)}
+								onblur={clearStarterPreview}
 							>
 								<span class="sc-tag">{item.label}</span>
-								<strong>{item.c.name.split(':')[0]}</strong>
+								<strong>{shortClusterLabel(item.c.name)}</strong>
+								<span class="sc-stat">{item.stat}</span>
 							</a>
 						{/each}
 					</div>
 				{/if}
 
 				<div class="pulse-foot">
-					<span class="pulse-hint">Hover any cluster · Click to inspect blocks</span>
+					{#if colorMode === 'trend'}
+						<div class="pulse-hint trend-counts" role="group" aria-label="Spotlight clusters by trend">
+							<button
+								type="button"
+								class="tc-btn tc-better"
+								class:active={trendFilter === 'improving'}
+								onclick={() => toggleTrendFilter('improving')}
+								title="Spotlight the {trendBreakdown.improving} improving clusters"
+							>
+								{trendBreakdown.improving} improving
+							</button>
+							<span class="ro-sep">·</span>
+							<button
+								type="button"
+								class="tc-btn tc-worse"
+								class:active={trendFilter === 'worsening'}
+								onclick={() => toggleTrendFilter('worsening')}
+								title="Spotlight the {trendBreakdown.worsening} worsening clusters"
+							>
+								{trendBreakdown.worsening} worsening
+							</button>
+							<span class="ro-sep">·</span>
+							<button
+								type="button"
+								class="tc-btn tc-stuck"
+								class:active={trendFilter === 'stuck'}
+								onclick={() => toggleTrendFilter('stuck')}
+								title="Spotlight the {trendBreakdown.stuck} chronically stuck clusters (≥16% empty)"
+							>
+								{trendBreakdown.stuck} stuck
+							</button>
+						</div>
+					{:else}
+						<span class="pulse-hint">
+							{numFmt(clustersData.meta.clusterCount)} clusters · {numFmt(clustersData.meta.segmentCount)} blocks
+						</span>
+					{/if}
 					<a href="/trends" class="pulse-link">Trends →</a>
 				</div>
 			{:else}
@@ -490,24 +779,8 @@
 		</div>
 	{/if}
 
-	<div class="map-controls-bar">
-		<div class="mode-toggle surface-float" role="group" aria-label="Map coloring">
-			<button
-				type="button"
-				class:active={colorMode === 'vacancy'}
-				onclick={() => setColorMode('vacancy')}
-			>
-				Vacancy
-			</button>
-			<button
-				type="button"
-				class:active={colorMode === 'trend'}
-				onclick={() => setColorMode('trend')}
-			>
-				1-Yr Trend
-			</button>
-		</div>
-
+	<!-- Top-right navigation: quick borough fly-to pills (paired under Search / GPS) -->
+	<div class="boro-bar">
 		<div class="mode-toggle boro-toggle surface-float" role="group" aria-label="Jump to borough">
 			{#each BOROUGH_VIEWS as b}
 				<button
@@ -519,6 +792,26 @@
 					{b.label}
 				</button>
 			{/each}
+		</div>
+	</div>
+
+	<!-- Bottom-left lens + legend: map coloring paired directly with its color key -->
+	<div class="map-controls-bar">
+		<div class="mode-toggle surface-float" role="group" aria-label="Map coloring">
+			<button
+				type="button"
+				class:active={colorMode === 'trend'}
+				onclick={() => setColorMode('trend')}
+			>
+				1-Yr Trend
+			</button>
+			<button
+				type="button"
+				class:active={colorMode === 'vacancy'}
+				onclick={() => setColorMode('vacancy')}
+			>
+				Vacancy
+			</button>
 		</div>
 
 		<div class="legend surface-float" aria-label="Map color scale">
@@ -532,9 +825,10 @@
 			{:else}
 				<span class="lg-label">2024 → 2025</span>
 				<span class="lg-step"><i style="background:rgba(14,110,72,0.78)"></i>≤-4 pts</span>
-				<span class="lg-step"><i style="background:rgba(31,138,91,0.45)"></i>-4 to -1.5</span>
-				<span class="lg-step"><i class="clear"></i>Flat</span>
-				<span class="lg-step"><i style="background:rgba(224,72,38,0.48)"></i>+1.5 to +4</span>
+				<span class="lg-step"><i style="background:rgba(31,138,91,0.45)"></i>Improving</span>
+				<span class="lg-step"><i class="clear"></i>Steady</span>
+				<span class="lg-step" title="Flat year-over-year but chronically ≥16% empty"><i class="stuck-hatch"></i>Stuck ≥16%</span>
+				<span class="lg-step"><i style="background:rgba(224,72,38,0.48)"></i>Worsening</span>
 				<span class="lg-step"><i style="background:rgba(155,28,36,0.78)"></i>+4+ pts</span>
 			{/if}
 		</div>
@@ -820,12 +1114,6 @@
 		color: inherit;
 	}
 
-	.flow-sb {
-		color: var(--muted);
-		font-size: 11px;
-		margin-left: 3px;
-	}
-
 	.pulse-foot {
 		display: flex;
 		align-items: center;
@@ -839,7 +1127,7 @@
 	.starter-row {
 		display: grid;
 		grid-template-columns: repeat(3, minmax(0, 1fr));
-		gap: 6px;
+		gap: 5px;
 		padding-top: 6px;
 		border-top: 1px solid var(--rule);
 	}
@@ -858,42 +1146,122 @@
 		transition: border-color 0.12s ease, background 0.12s ease;
 	}
 
-	.starter-chip:hover {
+	.starter-chip:hover,
+	.starter-chip.previewing {
 		border-color: var(--ink);
 		background: var(--panel);
 	}
 
 	.starter-chip .sc-tag {
 		font-family: var(--font-mono);
-		font-size: 9px;
+		font-size: 8.5px;
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 		color: var(--muted);
+		white-space: nowrap;
+	}
+
+	.starter-chip .sc-stat {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		font-weight: 600;
+		color: var(--muted);
+		line-height: 1.2;
 	}
 
 	.starter-chip.tone-hot .sc-tag,
-	.starter-chip.tone-worse .sc-tag {
+	.starter-chip.tone-hot .sc-stat,
+	.starter-chip.tone-worse .sc-tag,
+	.starter-chip.tone-worse .sc-stat {
 		color: var(--red);
 	}
 
-	.starter-chip.tone-better .sc-tag {
+	.starter-chip.tone-better .sc-tag,
+	.starter-chip.tone-better .sc-stat {
 		color: var(--green);
 	}
 
 	.starter-chip strong {
 		font-size: 11px;
 		font-weight: 600;
+		line-height: 1.25;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 
+	.trend-counts {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		white-space: nowrap;
+	}
+
+	.tc-btn {
+		border: 1px solid transparent;
+		background: transparent;
+		padding: 1px 4px;
+		margin: 0 -2px;
+		border-radius: 4px;
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background 0.1s ease, border-color 0.1s ease;
+	}
+
+	.tc-btn:hover {
+		background: var(--quiet);
+	}
+
+	.tc-better {
+		color: var(--green);
+	}
+
+	.tc-better.active {
+		background: var(--green-bg);
+		border-color: rgba(14, 110, 72, 0.35);
+	}
+
+	.tc-worse {
+		color: var(--red);
+	}
+
+	.tc-worse.active {
+		background: var(--red-bg);
+		border-color: rgba(180, 35, 24, 0.35);
+	}
+
+	.tc-stuck {
+		color: #8c1420;
+	}
+
+	.tc-stuck.active {
+		background: #f8ecea;
+		border-color: rgba(140, 20, 32, 0.4);
+	}
+
+	.boro-bar {
+		position: absolute;
+		top: 16px;
+		right: 16px;
+		z-index: 3;
+	}
+
 	.boro-toggle button {
-		padding: 4px 7px;
+		padding: 4px 8px;
+	}
+
+	@media (max-width: 720px) {
+		.boro-bar {
+			display: none;
+		}
 	}
 
 	.pulse-hint {
+		font-family: var(--font-mono);
+		font-size: 10.5px;
 		color: var(--muted);
 	}
 
@@ -983,5 +1351,20 @@
 	.lg-step i.clear {
 		background: #ffffff;
 		border: 1px solid #c8c8c2;
+	}
+
+	.lg-step i.stuck-hatch {
+		background: repeating-linear-gradient(
+			-45deg,
+			rgba(140, 20, 32, 0.55) 0px,
+			rgba(140, 20, 32, 0.55) 1.5px,
+			rgba(140, 20, 32, 0.08) 1.5px,
+			rgba(140, 20, 32, 0.08) 4px
+		);
+		border: 1px solid rgba(140, 20, 32, 0.35);
+	}
+
+	.ro-delta.stuck {
+		color: #8c1420;
 	}
 </style>
