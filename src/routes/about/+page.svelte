@@ -72,6 +72,17 @@
 					every day how much a single empty storefront, or one great new neighbor, shapes the feel
 					of a block.
 				</p>
+
+				<p>
+					This project is open source under the MIT license. The full source code, data pipeline,
+					and tests are public on
+					<a
+						href="https://github.com/pwolpe/nyc-storefront"
+						target="_blank"
+						rel="noopener noreferrer">github.com/pwolpe/nyc-storefront ↗</a
+					>, so journalists, researchers, block associations, or other cities are welcome to use,
+					inspect, and build on it.
+				</p>
 			</div>
 
 			<div class="clusters-note">
@@ -148,12 +159,12 @@
 			<div class="foot-row">
 				<a href="/" class="back-btn">← Back to NYC Map</a>
 				<a
-					href="https://github.com/pwolpe/"
+					href="https://github.com/pwolpe/nyc-storefront"
 					target="_blank"
 					rel="noopener noreferrer"
 					class="gh-link"
 				>
-					github.com/pwolpe ↗
+					github.com/pwolpe/nyc-storefront (MIT) ↗
 				</a>
 			</div>
 		</article>

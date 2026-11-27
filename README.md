@@ -1,14 +1,16 @@
-# Gates Down NYC
+# NYC Storefront Vacancy (`nycstorefront.com`)
 
-An unofficial, blazingly fast, stop-motion claymation explorer for New York City’s **16,047 empty storefronts**—combining the **NYC Comptroller’s quarterly Live XYZ ground surveys** with **NYC Dept. of Finance (DOF) Local Law 157 filings (`92iy-9c3n`)**, **PLUTO landlord records**, **311 smoke-shop complaints**, and a neighbor **Street Truth / Padlock Ghost** layer.
+An open-source, block-by-block explorer of New York City's commercial ground-floor storefronts, live at **[nycstorefront.com](https://nycstorefront.com)**.
 
-Built to be fun enough to share on social media—and rigorously tied out enough to send directly to your City Council Member and the Comptroller.
+Built with Svelte 5, SvelteKit, and MapLibre GL JS, it combines NYC Dept. of Finance storefront filings (`92iy-9c3n`, 2019–2025), the NYC Comptroller's quarterly storefront vacancy census, MapPLUTO parcel polygons, CSCL street centerlines, HPD ownership registrations, DOHMH/DCWP/Open Restaurants tenant records, DOB permits, OATH hearings, and 311 complaints into a fast street-level explorer.
 
-## Stack
-- **Svelte 5 (Runes) + SvelteKit** (`@sveltejs/adapter-cloudflare`)
-- **Cloudflare Workers + D1 (edge SQLite) + Cron Triggers** (`wrangler.jsonc`)
-- **MapLibre GL JS + OpenFreeMap Positron** (60fps vector maps, $0 Mapbox bill)
-- **Pre-optimized WebP claymation cast** (380 KB total across all 6 scenes) + repeatable OpenRouter / Nano Banana script (`scripts/paint.mjs`)
+## Key Features
+
+- **City -> Cluster -> Block -> Building hierarchy**: 349 street-aligned commercial clusters built from contiguous blocks with similar vacancy rates.
+- **True-scale block elevations**: Live MapPLUTO parcel raycasting showing real building widths, heights, corner wraps, business names, arrow-key block walking, and a playable 2019–2025 Time Machine.
+- **Deduplicated NYC DOF filings**: Automatically strips NYC DOF's Feb/June double-counting (~1,800 duplicate vacant rows/year) and corrupted 2023–2025 activity codes, and links condo billing lots (`7500+`) to pre-condo and unit BBLs.
+- **Building dossiers**: Interactive 2019–2025 occupancy bar charts with per-unit breakdowns, Landlord X-Ray (unmasking LLCs via HPD), Google Street View + Parcel + Aerial views, AI web-grounded Field Notes, and Street View Vision audits.
+- **Universal instant search (`⌘K` / `/`)**: Local cluster search, NYC GeoSearch address autocomplete, geolocation ("My Block"), and natural-language AI search.
 
 ## Local Development
 
@@ -17,29 +19,42 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` — works out of the box with zero API keys (uses real bundled Q3 2026 Comptroller + DOF 2019–2025 data and falls back to an in-memory Street Truth store when D1 isn’t attached).
+Open `http://localhost:5173`. The app runs out of the box with zero API keys using the bundled cluster/block datasets and public NYC Open Data APIs.
 
-## Refreshing Live Official NYC Data
+### Optional Environment Variables (`.env`)
 
-Anytime the Comptroller publishes a new quarter (or DOF updates `92iy-9c3n`), re-sync and mathematically tie out every dataset in one command:
+- `GOOGLE_MAPS_API_KEY`: Enables Google Street View facade imagery on building pages.
+- `OPENROUTER_API_KEY`: Enables natural-language AI search, cluster takeaways, web-grounded building Field Notes, and Street View Vision audits.
+- `CACHE_DIR`: Optional directory for persistent stale-while-revalidate disk caching (defaults to `.cache/nyc-storefront`; set to `/data/cache` on Railway with a mounted volume).
+
+## Data Pipeline & Tests
 
 ```bash
+# Re-sync official NYC Open Data & rebuild cluster shards
 npm run sync:data
+
+# Rebuild the pre-baked citywide business-name index
+node scripts/build-tenants-index.mjs
+
+# Run deduplication & tie-out tests + Svelte type checks
 npm test
+npm run check
+
+# Smoke-test block raycasting across all 5 boroughs
+npm run smoke -- https://nycstorefront.com
 ```
 
-## Painting More Claymation Scenes (OpenRouter / Nano Banana)
+## Deploying (Node / Railway)
+
+The project uses `@sveltejs/adapter-node` with precompression enabled (`railway.json` included):
 
 ```bash
-OPENROUTER_API_KEY=sk-or-... npm run paint -- corridor-8th-ave
+npm run build
+npm run start
 ```
 
-## Deploying to Cloudflare Workers (`wolpe.co` or custom domain)
+Set `HOST=0.0.0.0`, `NODE_ENV=production`, `PROTOCOL_HEADER=x-forwarded-proto`, and `HOST_HEADER=x-forwarded-host` behind a reverse proxy (and optionally mount a volume at `/data` with `CACHE_DIR=/data/cache`).
 
-```bash
-npx wrangler login
-npx wrangler d1 create gates-down-db
-# Paste the returned database_id into wrangler.jsonc
-npm run db:migrate:remote
-npm run deploy
-```
+## License
+
+[MIT](./LICENSE) — Copyright (c) 2026 Paul Wolpe. Public data originates from NYC Open Data, NYC Dept. of Finance, NYC Comptroller, NYC Planning, HPD, DOHMH, DCWP, DOB, OATH, and 311.

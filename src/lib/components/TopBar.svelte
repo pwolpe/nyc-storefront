@@ -52,9 +52,11 @@
 	let aiResults = $state<AiResultItem[]>([]);
 	let aiError = $state('');
 	let aiQueryRan = $state('');
+	let activeIdx = $state(-1);
 
 	let inputEl: HTMLInputElement | undefined;
 	let searchBoxEl: HTMLDivElement | undefined;
+	let dropdownEl = $state<HTMLDivElement | undefined>(undefined);
 	let geoTimer: ReturnType<typeof setTimeout> | null = null;
 	let geoAbort: AbortController | null = null;
 
@@ -408,6 +410,7 @@
 	function closeSearch() {
 		open = false;
 		query = '';
+		activeIdx = -1;
 		geoHits = [];
 		aiAnswer = '';
 		aiResults = [];
@@ -417,10 +420,83 @@
 		inputEl?.blur();
 	}
 
+	function selectGeoHit(hit: GeoSuggestion) {
+		searching = true;
+		jumpToCoord(hit.lng, hit.lat, hit.street, hit.bbl).finally(() => (searching = false));
+	}
+
+	// Flat ordered list of every visible dropdown action so ArrowDown/ArrowUp + Enter work everywhere
+	const navItems = $derived.by(() => {
+		const items: Array<{ id: string; run: () => void | Promise<void> }> = [];
+		const q = query.trim();
+		if (q.length === 0) {
+			items.push({ id: 'gps', run: () => jumpToMyBlock() });
+			for (let i = 0; i < EXAMPLE_PROMPTS.length; i++) {
+				const ex = EXAMPLE_PROMPTS[i];
+				items.push({ id: `ex:${i}`, run: () => runAiSearch(ex) });
+			}
+			return items;
+		}
+		if (!aiLoading && !aiError) {
+			for (let i = 0; i < aiResults.length; i++) {
+				const href = aiResults[i].href;
+				items.push({
+					id: `ai:${i}`,
+					run: async () => {
+						closeSearch();
+						await goto(href);
+					}
+				});
+			}
+		}
+		for (let i = 0; i < geoHits.length; i++) {
+			const hit = geoHits[i];
+			items.push({ id: `geo:${i}`, run: () => selectGeoHit(hit) });
+		}
+		for (let i = 0; i < localClusters.length; i++) {
+			const cid = localClusters[i].c.id;
+			items.push({
+				id: `cluster:${i}`,
+				run: async () => {
+					closeSearch();
+					await goto(`/cluster/${cid}`);
+				}
+			});
+		}
+		if (q.length >= 3 && !aiLoading && aiQueryRan !== q) {
+			items.push({ id: 'ask-ai', run: () => runAiSearch() });
+		}
+		return items;
+	});
+
+	const activeNavId = $derived(
+		activeIdx >= 0 && activeIdx < navItems.length ? navItems[activeIdx].id : null
+	);
+
+	// Keep activeIdx within bounds when async results arrive or change
+	$effect(() => {
+		const len = navItems.length;
+		if (activeIdx >= len) {
+			activeIdx = len > 0 ? len - 1 : -1;
+		}
+	});
+
+	function scrollActiveIntoView(id: string | null) {
+		if (!id || !dropdownEl) return;
+		const el = dropdownEl.querySelector<HTMLElement>(`[data-nav-id="${id}"]`);
+		el?.scrollIntoView({ block: 'nearest' });
+	}
+
+	function setActiveById(id: string) {
+		const idx = navItems.findIndex((it) => it.id === id);
+		if (idx !== -1) activeIdx = idx;
+	}
+
 	function onKeydown(e: KeyboardEvent) {
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
 			e.preventDefault();
 			open = true;
+			activeIdx = -1;
 			inputEl?.focus();
 			inputEl?.select();
 			return;
@@ -433,6 +509,7 @@
 		) {
 			e.preventDefault();
 			open = true;
+			activeIdx = -1;
 			inputEl?.focus();
 		}
 	}
@@ -441,7 +518,34 @@
 		if (e.key === 'Escape') {
 			e.preventDefault();
 			open = false;
+			activeIdx = -1;
 			inputEl?.blur();
+			return;
+		}
+		if (e.key === 'ArrowDown') {
+			e.preventDefault();
+			e.stopPropagation();
+			if (!open) open = true;
+			if (navItems.length === 0) return;
+			const next = activeIdx < navItems.length - 1 ? activeIdx + 1 : 0;
+			activeIdx = next;
+			scrollActiveIntoView(navItems[next]?.id ?? null);
+			return;
+		}
+		if (e.key === 'ArrowUp') {
+			e.preventDefault();
+			e.stopPropagation();
+			if (!open) open = true;
+			if (navItems.length === 0) return;
+			const prev = activeIdx > 0 ? activeIdx - 1 : navItems.length - 1;
+			activeIdx = prev;
+			scrollActiveIntoView(navItems[prev]?.id ?? null);
+			return;
+		}
+		if (e.key === 'Enter' && open && activeIdx >= 0 && navItems[activeIdx]) {
+			e.preventDefault();
+			e.stopPropagation();
+			void navItems[activeIdx].run();
 		}
 	}
 
@@ -565,6 +669,7 @@
 					}}
 					oninput={() => {
 						open = true;
+						activeIdx = -1;
 						error = '';
 						if (query.trim() !== aiQueryRan) {
 							aiAnswer = '';
@@ -574,7 +679,11 @@
 					}}
 					onkeydown={onInputKeydown}
 					placeholder="Address, area, or ask anything…"
+					role="combobox"
 					aria-label="Search NYC addresses, neighborhoods, or ask a question"
+					aria-expanded={showDropdown}
+					aria-controls="topbar-search-listbox"
+					aria-autocomplete="list"
 					autocomplete="off"
 				/>
 				{#if !open && !query}
@@ -608,31 +717,56 @@
 			{/if}
 
 			{#if showDropdown}
-				<div class="search-drop surface-float" role="listbox" aria-label="Search results">
+				<div
+					id="topbar-search-listbox"
+					class="search-drop surface-float"
+					role="listbox"
+					aria-label="Search results"
+					bind:this={dropdownEl}
+				>
 					{#if query.trim().length === 0}
 						<div class="drop-sec">
-							<button type="button" class="drop-row near-me" onclick={jumpToMyBlock} disabled={locating}>
+							<button
+								type="button"
+								role="option"
+								aria-selected={activeNavId === 'gps'}
+								data-nav-id="gps"
+								class="drop-row near-me"
+								class:active={activeNavId === 'gps'}
+								onmouseenter={() => setActiveById('gps')}
+								onclick={jumpToMyBlock}
+								disabled={locating}
+							>
 								<span class="dr-badge accent">GPS</span>
 								<div class="dr-copy">
 									<strong>{locating ? 'Locating your block…' : 'Jump to my current NYC block'}</strong>
 									<span>Snap straight to the storefronts outside right now</span>
 								</div>
-								<span class="dr-go">→</span>
+								<span class="dr-go">{activeNavId === 'gps' ? '↵' : '→'}</span>
 							</button>
 						</div>
 
 						<div class="drop-sec">
 							<div class="drop-kicker">Ask NYC Storefronts · AI</div>
-							{#each EXAMPLE_PROMPTS as ex}
+							{#each EXAMPLE_PROMPTS as ex, i}
+								{@const navId = `ex:${i}`}
 								<button
 									type="button"
+									role="option"
+									aria-selected={activeNavId === navId}
+									data-nav-id={navId}
 									class="drop-row prompt-row"
+									class:active={activeNavId === navId}
+									onmouseenter={() => setActiveById(navId)}
 									onclick={() => runAiSearch(ex)}
 								>
 									<span class="dr-spark" aria-hidden="true">✦</span>
 									<div class="dr-copy">
 										<strong class="prompt-text">{ex}</strong>
 									</div>
+									{#if activeNavId === navId}
+										<span class="dr-go">↵</span>
+									{/if}
 								</button>
 							{/each}
 						</div>
@@ -656,10 +790,16 @@
 									{#if aiAnswer}
 										<p class="ai-answer">{aiAnswer}</p>
 									{/if}
-									{#each aiResults as r}
+									{#each aiResults as r, i}
+										{@const navId = `ai:${i}`}
 										<a
 											href={r.href}
+											role="option"
+											aria-selected={activeNavId === navId}
+											data-nav-id={navId}
 											class="drop-row"
+											class:active={activeNavId === navId}
+											onmouseenter={() => setActiveById(navId)}
 											onclick={() => closeSearch()}
 										>
 											<div class="dr-copy">
@@ -679,22 +819,23 @@
 						{#if geoHits.length > 0}
 							<div class="drop-sec">
 								<div class="drop-kicker">NYC Addresses</div>
-								{#each geoHits as hit}
+								{#each geoHits as hit, i}
+									{@const navId = `geo:${i}`}
 									<button
 										type="button"
+										role="option"
+										aria-selected={activeNavId === navId}
+										data-nav-id={navId}
 										class="drop-row"
-										onclick={() => {
-											searching = true;
-											jumpToCoord(hit.lng, hit.lat, hit.street, hit.bbl).finally(
-												() => (searching = false)
-											);
-										}}
+										class:active={activeNavId === navId}
+										onmouseenter={() => setActiveById(navId)}
+										onclick={() => selectGeoHit(hit)}
 									>
 										<div class="dr-copy">
 											<strong>{hit.label}</strong>
 											<span>{hit.borough}{hit.bbl ? ' · Jump straight to building' : ' · Jump to block'}</span>
 										</div>
-										<span class="dr-badge">{hit.bbl ? 'Bldg' : 'Block'}</span>
+										<span class="dr-badge">{activeNavId === navId ? '↵' : hit.bbl ? 'Bldg' : 'Block'}</span>
 									</button>
 								{/each}
 							</div>
@@ -704,10 +845,16 @@
 						{#if localClusters.length > 0}
 							<div class="drop-sec">
 								<div class="drop-kicker">Clusters & Corridors</div>
-								{#each localClusters as { c, matchedStreet }}
+								{#each localClusters as { c, matchedStreet }, i}
+									{@const navId = `cluster:${i}`}
 									<a
 										href="/cluster/{c.id}"
+										role="option"
+										aria-selected={activeNavId === navId}
+										data-nav-id={navId}
 										class="drop-row"
+										class:active={activeNavId === navId}
+										onmouseenter={() => setActiveById(navId)}
 										onclick={() => closeSearch()}
 									>
 										<div class="dr-copy">
@@ -733,7 +880,16 @@
 						<!-- Always-available AI Natural Language Trigger -->
 						{#if query.trim().length >= 3 && !aiLoading && aiQueryRan !== query.trim()}
 							<div class="drop-sec ask-foot">
-								<button type="button" class="drop-row ask-row" onclick={() => runAiSearch()}>
+								<button
+									type="button"
+									role="option"
+									aria-selected={activeNavId === 'ask-ai'}
+									data-nav-id="ask-ai"
+									class="drop-row ask-row"
+									class:active={activeNavId === 'ask-ai'}
+									onmouseenter={() => setActiveById('ask-ai')}
+									onclick={() => runAiSearch()}
+								>
 									<span class="dr-spark" aria-hidden="true">✦</span>
 									<div class="dr-copy">
 										<strong>Ask AI: “{query.trim()}”</strong>
@@ -1140,8 +1296,13 @@
 		transition: background 0.1s ease;
 	}
 
-	.drop-row:hover {
+	.drop-row:hover,
+	.drop-row.active {
 		background: var(--quiet);
+	}
+
+	.drop-row.active {
+		box-shadow: inset 2.5px 0 0 var(--ink);
 	}
 
 	.dr-copy {
