@@ -2,7 +2,9 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import type { PageData } from './$types';
+	import { extractDoorNeighbors, type DoorNeighbor } from './+page';
 	import type {
+		BlockLotsResponse,
 		BuildingDossier,
 		BuildingDofYear,
 		LandlordXrayResponse,
@@ -17,6 +19,7 @@
 		formatMonthYear
 	} from '$lib/nycGlossary';
 	import {
+		blockLotsClientCache,
 		buildingCache,
 		fieldNoteClientCache,
 		visionAuditClientCache,
@@ -32,8 +35,18 @@
 	const cluster = $derived(data.shard.cluster);
 	const seg = $derived(data.segment);
 	const bbl = $derived(data.bbl);
-	const prevBuilding = $derived(data.prevBuilding);
-	const nextBuilding = $derived(data.nextBuilding);
+	let asyncNeighbors = $state<{
+		key: string;
+		prev: DoorNeighbor | null;
+		next: DoorNeighbor | null;
+	} | null>(null);
+	const navKey = $derived(`${cluster.id}:${seg.id}:${bbl}`);
+	const prevBuilding = $derived(
+		data.prevBuilding ?? (asyncNeighbors?.key === navKey ? asyncNeighbors.prev : null)
+	);
+	const nextBuilding = $derived(
+		data.nextBuilding ?? (asyncNeighbors?.key === navKey ? asyncNeighbors.next : null)
+	);
 	const cityRate = $derived(data.clustersData.meta.citywideRate);
 
 	let dossier = $state<BuildingDossier | null>(null);
@@ -394,10 +407,16 @@
 			return;
 		}
 
+		// Clear previous building's dossier immediately so a cold navigation shows the loading state
+		if (dossier && dossier.bbl !== targetBbl) dossier = null;
 		loading = true;
+		const aliases = data.initialAliases || [];
+		const apiUrl =
+			`/api/building?bbl=${encodeURIComponent(targetBbl)}` +
+			(aliases.length > 0 ? `&alias=${encodeURIComponent(aliases.join(','))}` : '');
 		buildingCache
 			.getOrFetch(targetBbl, async () => {
-				const r = await fetch(`/api/building?bbl=${encodeURIComponent(targetBbl)}`, {
+				const r = await fetch(apiUrl, {
 					signal: controller.signal
 				});
 				if (!r.ok) throw new Error('Unable to load building dossier');
@@ -418,6 +437,43 @@
 			});
 
 		return () => controller.abort();
+	});
+
+	// Populate Prev/Next sidewalk neighbors asynchronously when jumping straight from Search
+	$effect(() => {
+		const cid = cluster.id;
+		const sid = seg.id;
+		const targetBbl = bbl;
+		const key = `${cid}:${sid}:${targetBbl}`;
+		if (data.prevBuilding || data.nextBuilding) return;
+
+		const lotsKey = `${cid}:${sid}`;
+		const cachedLots = blockLotsClientCache.get(lotsKey);
+		if (cachedLots) {
+			const n = extractDoorNeighbors(cachedLots, targetBbl);
+			asyncNeighbors = { key, prev: n.prevBuilding, next: n.nextBuilding };
+			return;
+		}
+
+		let cancelled = false;
+		blockLotsClientCache
+			.getOrFetch(lotsKey, async () => {
+				const r = await fetch(
+					`/api/block-lots?cluster=${encodeURIComponent(cid)}&segment=${encodeURIComponent(sid)}`
+				);
+				if (!r.ok) return null;
+				return (await r.json()) as BlockLotsResponse;
+			})
+			.then((lots) => {
+				if (cancelled || !lots) return;
+				const n = extractDoorNeighbors(lots, targetBbl);
+				asyncNeighbors = { key, prev: n.prevBuilding, next: n.nextBuilding };
+			})
+			.catch(() => {});
+
+		return () => {
+			cancelled = true;
+		};
 	});
 
 	function moneyFmt(v: number | null): string {
@@ -916,6 +972,15 @@
 				<strong>Could not load live building records:</strong> {loadError}
 			</div>
 		{:else if loading && !dossier}
+			<nav class="bldg-nav-bar" aria-label="Block navigation">
+				<a href="/cluster/{cluster.id}/block/{seg.id}" class="back-link">
+					← {seg.streetName} ({seg.between})
+				</a>
+				<span class="loading-pill">
+					<span class="loading-dot"></span>
+					Loading building dossier, Street View &amp; NYC filings…
+				</span>
+			</nav>
 			<div class="loading-hero">
 				<div class="skel hero-l surface"></div>
 				<div class="skel hero-r surface"></div>
@@ -3305,6 +3370,39 @@
 	}
 
 	/* Skeleton Loading */
+	.loading-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		font-family: var(--font-mono);
+		font-size: 11.5px;
+		color: var(--ink-soft);
+		padding: 4px 10px;
+		border-radius: 999px;
+		background: var(--panel);
+		border: 1px solid var(--rule);
+	}
+
+	.loading-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--accent);
+		animation: load-pulse 0.9s ease-in-out infinite;
+	}
+
+	@keyframes load-pulse {
+		0%,
+		100% {
+			opacity: 0.3;
+			transform: scale(0.8);
+		}
+		50% {
+			opacity: 1;
+			transform: scale(1.1);
+		}
+	}
+
 	.loading-hero {
 		display: grid;
 		grid-template-columns: 1fr 480px;

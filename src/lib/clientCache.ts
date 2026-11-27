@@ -55,6 +55,7 @@ import type {
 	BlockLotsResponse,
 	BlockTenantsResponse,
 	BuildingDossier,
+	ClusterShard,
 	LandlordXrayResponse,
 	StreetViewAuditResult
 } from '$lib/types';
@@ -72,6 +73,7 @@ export interface CachedClusterBrief {
 	citations: Array<{ title: string; url: string }>;
 }
 
+export const clusterShardCache = new ClientCache<ClusterShard>(1000 * 60 * 60, 80);
 export const buildingCache = new ClientCache<BuildingDossier>(1000 * 60 * 20, 120);
 export const blockLotsClientCache = new ClientCache<BlockLotsResponse>(1000 * 60 * 30, 160);
 export const blockTenantsClientCache = new ClientCache<BlockTenantsResponse>(1000 * 60 * 20, 160);
@@ -79,6 +81,29 @@ export const xrayClientCache = new ClientCache<LandlordXrayResponse>(1000 * 60 *
 export const fieldNoteClientCache = new ClientCache<CachedFieldNote>(1000 * 60 * 30, 120);
 export const visionAuditClientCache = new ClientCache<StreetViewAuditResult>(1000 * 60 * 30, 120);
 export const clusterBriefClientCache = new ClientCache<CachedClusterBrief>(1000 * 60 * 30, 80);
+
+export function getClusterShard(
+	clusterId: string,
+	fetchFn: typeof fetch = fetch
+): Promise<ClusterShard | null> {
+	if (!clusterId) return Promise.resolve(null);
+	return clusterShardCache.getOrFetch(clusterId, async () => {
+		const res = await fetchFn(`/data/clusters/${encodeURIComponent(clusterId)}.json`);
+		if (!res.ok) return null;
+		return (await res.json()) as ClusterShard;
+	});
+}
+
+export function warmClusterShard(clusterId: string): void {
+	if (!clusterId || clusterShardCache.get(clusterId)) return;
+	void clusterShardCache.getOrFetch(clusterId, async () => {
+		const res = await fetch(`/data/clusters/${encodeURIComponent(clusterId)}.json`, {
+			priority: 'low' as RequestPriority
+		});
+		if (!res.ok) return null;
+		return (await res.json()) as ClusterShard;
+	});
+}
 
 export function warmBuilding(bbl: string, aliases?: string[]): void {
 	const clean = (bbl || '').split('.')[0].trim();

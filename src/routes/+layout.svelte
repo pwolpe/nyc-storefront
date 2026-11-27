@@ -2,9 +2,11 @@
 	import '../app.css';
 	import type { Snippet } from 'svelte';
 	import { afterNavigate } from '$app/navigation';
+	import { navigating } from '$app/state';
 	import { browser } from '$app/environment';
 
 	let { children }: { children: Snippet } = $props();
+	const isNavigating = $derived(Boolean(navigating.to));
 
 	let lastSentKey = '';
 	let sentInitialReferrer = false;
@@ -57,4 +59,32 @@
 	}
 </script>
 
+{#if isNavigating}
+	<div class="nav-progress-bar" role="progressbar" aria-label="Loading page"></div>
+{/if}
+
 {@render children()}
+
+<style>
+	.nav-progress-bar {
+		position: fixed;
+		top: 0;
+		left: 0;
+		right: 0;
+		height: 3px;
+		z-index: 9999;
+		pointer-events: none;
+		background: linear-gradient(90deg, rgba(255, 66, 0, 0.15) 0%, #ff4200 45%, rgba(255, 66, 0, 0.15) 100%);
+		background-size: 200% 100%;
+		animation: nav-progress-slide 0.9s ease-in-out infinite;
+	}
+
+	@keyframes nav-progress-slide {
+		0% {
+			background-position: 100% 0;
+		}
+		100% {
+			background-position: -100% 0;
+		}
+	}
+</style>

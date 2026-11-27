@@ -1,6 +1,6 @@
 import { error } from '@sveltejs/kit';
 import { browser } from '$app/environment';
-import { blockLotsClientCache, buildingCache } from '$lib/clientCache';
+import { blockLotsClientCache, buildingCache, getClusterShard } from '$lib/clientCache';
 import type { PageLoad } from './$types';
 import type { BlockLot, BlockLotsResponse, BuildingDossier, ClusterShard } from '$lib/types';
 
@@ -20,6 +20,77 @@ function shortNeighborLabel(lot: BlockLot): string {
 		.replace(/\bEast\b(?=\s+\d)/i, 'E');
 }
 
+export function extractDoorNeighbors(
+	lotsData: BlockLotsResponse | null,
+	targetBbl: string
+): {
+	prevBuilding: DoorNeighbor | null;
+	nextBuilding: DoorNeighbor | null;
+	sidewalkLabel: string | null;
+} {
+	let prevBuilding: DoorNeighbor | null = null;
+	let nextBuilding: DoorNeighbor | null = null;
+	let sidewalkLabel: string | null = null;
+	if (!lotsData) return { prevBuilding, nextBuilding, sidewalkLabel };
+
+	try {
+		const sides = [lotsData.sideA || [], lotsData.sideB || []];
+		for (const side of sides) {
+			const idx = side.findIndex(
+				(l) =>
+					l.bbl === targetBbl ||
+					l.storefronts.some((sf) => (sf.bbl || '').split('.')[0].trim() === targetBbl)
+			);
+			if (idx === -1) continue;
+			sidewalkLabel = side[idx].sideLabel;
+			for (let i = idx - 1; i >= 0; i--) {
+				if (/^[1-5]\d{9}$/.test(side[i].bbl) && side[i].bbl !== targetBbl) {
+					prevBuilding = {
+						bbl: side[i].bbl,
+						label: shortNeighborLabel(side[i]),
+						kind: side[i].kind,
+						vacantCount: side[i].vacantCount
+					};
+					break;
+				}
+			}
+			for (let i = idx + 1; i < side.length; i++) {
+				if (/^[1-5]\d{9}$/.test(side[i].bbl) && side[i].bbl !== targetBbl) {
+					nextBuilding = {
+						bbl: side[i].bbl,
+						label: shortNeighborLabel(side[i]),
+						kind: side[i].kind,
+						vacantCount: side[i].vacantCount
+					};
+					break;
+				}
+			}
+			break;
+		}
+	} catch {
+		// Ignore malformed response; stepper stays hidden
+	}
+	return { prevBuilding, nextBuilding, sidewalkLabel };
+}
+
+export function findBblAliases(lots: BlockLotsResponse | null, targetBbl: string): string[] {
+	if (!lots) return [];
+	const all = [...(lots.sideA || []), ...(lots.sideB || [])];
+	const lot = all.find(
+		(l) =>
+			l.bbl === targetBbl ||
+			l.storefronts.some((sf) => (sf.bbl || '').split('.')[0].trim() === targetBbl)
+	);
+	if (!lot) return [];
+	const set = new Set<string>();
+	if (/^[1-5]\d{9}$/.test(lot.bbl) && lot.bbl !== targetBbl) set.add(lot.bbl);
+	for (const sf of lot.storefronts) {
+		const sb = (sf.bbl || '').split('.')[0].trim();
+		if (/^[1-5]\d{9}$/.test(sb) && sb !== targetBbl) set.add(sb);
+	}
+	return [...set].sort().slice(0, 6);
+}
+
 export const load: PageLoad = async ({ params, fetch }) => {
 	if (!/^[1-5]\d{9}$/.test(params.bbl)) {
 		throw error(400, `Invalid NYC BBL "${params.bbl}"`);
@@ -29,38 +100,45 @@ export const load: PageLoad = async ({ params, fetch }) => {
 	const cachedLots = browser ? blockLotsClientCache.get(lotsKey) : null;
 	const cachedDossier = browser ? buildingCache.get(params.bbl) : null;
 
-	// If we came from the Block page, forward any linked storefront/pre-condo BBLs attached to this lot
-	const findAliases = (lots: BlockLotsResponse | null): string[] => {
-		if (!lots) return [];
-		const all = [...(lots.sideA || []), ...(lots.sideB || [])];
-		const lot = all.find(
-			(l) =>
-				l.bbl === params.bbl ||
-				l.storefronts.some((sf) => (sf.bbl || '').split('.')[0].trim() === params.bbl)
-		);
-		if (!lot) return [];
-		const set = new Set<string>();
-		if (/^[1-5]\d{9}$/.test(lot.bbl) && lot.bbl !== params.bbl) set.add(lot.bbl);
-		for (const sf of lot.storefronts) {
-			const sb = (sf.bbl || '').split('.')[0].trim();
-			if (/^[1-5]\d{9}$/.test(sb) && sb !== params.bbl) set.add(sb);
+	// Client-side navigation: enter the building page IMMEDIATELY using the cached cluster shard
+	// (0ms when coming from Search or Block) instead of blocking the whole transition for 2-3s on
+	// cold NYC API calls. The building page streams the dossier (joining any in-flight hover prefetch!)
+	// and fills in prev/next door neighbors asynchronously.
+	if (browser) {
+		const shard = await getClusterShard(params.id, fetch);
+		if (!shard) throw error(404, `Cluster "${params.id}" not found`);
+		const segment = shard.segmentDetails[params.segmentId];
+		if (!segment) {
+			throw error(404, `Block "${params.segmentId}" not found in cluster "${params.id}"`);
 		}
-		return [...set].sort().slice(0, 6);
-	};
+		const { prevBuilding, nextBuilding, sidewalkLabel } = extractDoorNeighbors(
+			cachedLots,
+			params.bbl
+		);
+		return {
+			shard,
+			segment,
+			bbl: params.bbl,
+			prevBuilding,
+			nextBuilding,
+			sidewalkLabel,
+			initialDossier: cachedDossier,
+			initialAliases: findBblAliases(cachedLots, params.bbl)
+		};
+	}
 
-	const initialAliases = findAliases(cachedLots);
+	// SSR (direct URL visits / crawlers / shared links): fetch all three in parallel for complete HTML
+	const initialAliases = findBblAliases(cachedLots, params.bbl);
 	const buildingApiUrl =
 		`/api/building?bbl=${encodeURIComponent(params.bbl)}` +
 		(initialAliases.length > 0 ? `&alias=${encodeURIComponent(initialAliases.join(','))}` : '');
 
 	const [res, lotsRes, dossierRes] = await Promise.all([
 		fetch(`/data/clusters/${params.id}.json`),
-		cachedLots
-			? Promise.resolve(null)
-			: fetch(
-					`/api/block-lots?cluster=${encodeURIComponent(params.id)}&segment=${encodeURIComponent(params.segmentId)}`
-				).catch(() => null),
-		cachedDossier ? Promise.resolve(null) : fetch(buildingApiUrl).catch(() => null)
+		fetch(
+			`/api/block-lots?cluster=${encodeURIComponent(params.id)}&segment=${encodeURIComponent(params.segmentId)}`
+		).catch(() => null),
+		fetch(buildingApiUrl).catch(() => null)
 	]);
 
 	if (!res.ok) throw error(404, `Cluster "${params.id}" not found`);
@@ -71,75 +149,26 @@ export const load: PageLoad = async ({ params, fetch }) => {
 		throw error(404, `Block "${params.segmentId}" not found in cluster "${params.id}"`);
 	}
 
-	let initialDossier: BuildingDossier | null = cachedDossier;
-	if (!initialDossier && dossierRes && dossierRes.ok) {
+	let initialDossier: BuildingDossier | null = null;
+	if (dossierRes && dossierRes.ok) {
 		try {
 			const parsed = (await dossierRes.json()) as BuildingDossier;
-			if (parsed?.bbl === params.bbl) {
-				initialDossier = parsed;
-				if (browser) buildingCache.set(params.bbl, parsed);
-			}
+			if (parsed?.bbl === params.bbl) initialDossier = parsed;
 		} catch {
 			// Fall back to client fetch if needed
 		}
 	}
 
-	let prevBuilding: DoorNeighbor | null = null;
-	let nextBuilding: DoorNeighbor | null = null;
-	let sidewalkLabel: string | null = null;
-
-	let lotsData: BlockLotsResponse | null = cachedLots;
-	if (!lotsData && lotsRes && lotsRes.ok) {
+	let lotsData: BlockLotsResponse | null = null;
+	if (lotsRes && lotsRes.ok) {
 		try {
 			lotsData = (await lotsRes.json()) as BlockLotsResponse;
-			if (browser && lotsData) blockLotsClientCache.set(lotsKey, lotsData);
 		} catch {
 			lotsData = null;
 		}
 	}
 
-	if (lotsData) {
-		try {
-			const sides = [lotsData.sideA || [], lotsData.sideB || []];
-			for (const side of sides) {
-				// Find this building by exact BBL or condo unit storefront BBL
-				const idx = side.findIndex(
-					(l) =>
-						l.bbl === params.bbl ||
-						l.storefronts.some((sf) => (sf.bbl || '').split('.')[0].trim() === params.bbl)
-				);
-				if (idx === -1) continue;
-				sidewalkLabel = side[idx].sideLabel;
-				// Walk left to find nearest navigable neighbor with a valid BBL
-				for (let i = idx - 1; i >= 0; i--) {
-					if (/^[1-5]\d{9}$/.test(side[i].bbl) && side[i].bbl !== params.bbl) {
-						prevBuilding = {
-							bbl: side[i].bbl,
-							label: shortNeighborLabel(side[i]),
-							kind: side[i].kind,
-							vacantCount: side[i].vacantCount
-						};
-						break;
-					}
-				}
-				// Walk right to find nearest navigable neighbor with a valid BBL
-				for (let i = idx + 1; i < side.length; i++) {
-					if (/^[1-5]\d{9}$/.test(side[i].bbl) && side[i].bbl !== params.bbl) {
-						nextBuilding = {
-							bbl: side[i].bbl,
-							label: shortNeighborLabel(side[i]),
-							kind: side[i].kind,
-							vacantCount: side[i].vacantCount
-						};
-						break;
-					}
-				}
-				break;
-			}
-		} catch {
-			// Ignore malformed response; stepper simply stays hidden
-		}
-	}
+	const { prevBuilding, nextBuilding, sidewalkLabel } = extractDoorNeighbors(lotsData, params.bbl);
 
 	return {
 		shard,
@@ -148,6 +177,7 @@ export const load: PageLoad = async ({ params, fetch }) => {
 		prevBuilding,
 		nextBuilding,
 		sidewalkLabel,
-		initialDossier
+		initialDossier,
+		initialAliases: findBblAliases(lotsData, params.bbl)
 	};
 };

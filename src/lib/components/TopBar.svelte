@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import type { ClustersFile, ClusterProps, ClusterShard, SegmentSummary } from '$lib/types';
 	import { pct, rateTone, deltaPts, deltaTone } from '$lib/format';
+	import { getClusterShard, warmBuilding, warmClusterShard } from '$lib/clientCache';
 
 	interface Props {
 		cityRate: number;
@@ -53,6 +54,8 @@
 	let aiError = $state('');
 	let aiQueryRan = $state('');
 	let activeIdx = $state(-1);
+	let jumpingNavId = $state<string | null>(null);
+	let jumpingLabel = $state('');
 
 	let inputEl: HTMLInputElement | undefined;
 	let searchBoxEl: HTMLDivElement | undefined;
@@ -214,7 +217,11 @@
 						bbl: String(feat.properties?.addendum?.pad?.bbl || '').replace(/\D/g, '')
 					});
 				}
-				if (!geoAbort.signal.aborted) geoHits = hits;
+				if (!geoAbort.signal.aborted) {
+					geoHits = hits;
+					// Silently pre-warm the #1 address hit (cluster shard + building dossier) while the user reads the dropdown
+					if (hits[0]) prefetchGeoHit(hits[0]);
+				}
 			} catch {
 				// ignore aborted or network error
 			}
@@ -226,12 +233,7 @@
 		};
 	});
 
-	async function jumpToCoord(
-		lng: number,
-		lat: number,
-		streetHint = '',
-		preferredBbl = ''
-	): Promise<boolean> {
+	function findClusterForCoord(lng: number, lat: number) {
 		let hitCluster = clustersData.clusters.features.find((f) => {
 			const b = f.properties.bbox;
 			if (lng < b[0] || lng > b[2] || lat < b[1] || lat > b[3]) return false;
@@ -248,15 +250,33 @@
 				}
 			}
 			// Guard against coordinates way outside NYC (> ~2.5km from any cluster)
-			if (bestD > 0.03) return false;
+			if (bestD > 0.03) return null;
 		}
+		return hitCluster ?? null;
+	}
+
+	function prefetchGeoHit(hit: GeoSuggestion) {
+		const hitCluster = findClusterForCoord(hit.lng, hit.lat);
+		if (hitCluster) warmClusterShard(hitCluster.properties.id);
+		if (/^[1-5]\d{9}$/.test(hit.bbl)) warmBuilding(hit.bbl);
+	}
+
+	async function jumpToCoord(
+		lng: number,
+		lat: number,
+		streetHint = '',
+		preferredBbl = ''
+	): Promise<boolean> {
+		const hitCluster = findClusterForCoord(lng, lat);
 		if (!hitCluster) return false;
 
 		const cid = hitCluster.properties.id;
 		const streetNorm = normStreet(streetHint);
-		const shardRes = await fetch(`/data/clusters/${cid}.json`);
-		if (shardRes.ok) {
-			const shard: ClusterShard = await shardRes.json();
+		// Kick off building dossier warm-up in parallel with shard resolution if we already know the BBL
+		if (/^[1-5]\d{9}$/.test(preferredBbl)) warmBuilding(preferredBbl);
+
+		const shard: ClusterShard | null = await getClusterShard(cid);
+		if (shard) {
 			let bestSeg: SegmentSummary | null = null;
 			let bestScore = Infinity;
 
@@ -274,18 +294,18 @@
 			}
 
 			if (bestSeg && bestScore < 0.0025) {
-				closeSearch();
 				if (/^[1-5]\d{9}$/.test(preferredBbl)) {
 					await goto(`/cluster/${cid}/block/${bestSeg.id}/building/${preferredBbl}`);
 				} else {
 					await goto(`/cluster/${cid}/block/${bestSeg.id}`);
 				}
+				closeSearch();
 				return true;
 			}
 		}
 
-		closeSearch();
 		await goto(`/cluster/${cid}`);
+		closeSearch();
 		return true;
 	}
 
@@ -411,6 +431,8 @@
 		open = false;
 		query = '';
 		activeIdx = -1;
+		jumpingNavId = null;
+		jumpingLabel = '';
 		geoHits = [];
 		aiAnswer = '';
 		aiResults = [];
@@ -420,9 +442,22 @@
 		inputEl?.blur();
 	}
 
-	function selectGeoHit(hit: GeoSuggestion) {
+	async function selectGeoHit(hit: GeoSuggestion, navId?: string) {
+		if (searching) return;
 		searching = true;
-		jumpToCoord(hit.lng, hit.lat, hit.street, hit.bbl).finally(() => (searching = false));
+		jumpingNavId = navId ?? null;
+		jumpingLabel = hit.label;
+		error = '';
+		try {
+			const ok = await jumpToCoord(hit.lng, hit.lat, hit.street, hit.bbl);
+			if (!ok) error = 'Address is outside mapped NYC commercial blocks';
+		} catch {
+			error = 'Could not open that address';
+		} finally {
+			searching = false;
+			jumpingNavId = null;
+			jumpingLabel = '';
+		}
 	}
 
 	// Flat ordered list of every visible dropdown action so ArrowDown/ArrowUp + Enter work everywhere
@@ -451,7 +486,8 @@
 		}
 		for (let i = 0; i < geoHits.length; i++) {
 			const hit = geoHits[i];
-			items.push({ id: `geo:${i}`, run: () => selectGeoHit(hit) });
+			const navId = `geo:${i}`;
+			items.push({ id: navId, run: () => selectGeoHit(hit, navId) });
 		}
 		for (let i = 0; i < localClusters.length; i++) {
 			const cid = localClusters[i].c.id;
@@ -478,6 +514,14 @@
 		const len = navItems.length;
 		if (activeIdx >= len) {
 			activeIdx = len > 0 ? len - 1 : -1;
+		}
+	});
+
+	// Pre-warm GeoSearch address hit when highlighted via keyboard arrows
+	$effect(() => {
+		if (activeNavId && activeNavId.startsWith('geo:')) {
+			const idx = Number(activeNavId.slice(4));
+			if (geoHits[idx]) prefetchGeoHit(geoHits[idx]);
 		}
 	});
 
@@ -707,8 +751,12 @@
 						</svg>
 					{/if}
 				</button>
-				<button type="submit" class="go-btn" disabled={searching || aiLoading} title="Go">
-					{searching || aiLoading ? '…' : '→'}
+				<button type="submit" class="go-btn" disabled={searching || aiLoading} title={searching ? `Opening ${jumpingLabel || 'result'}…` : 'Go'}>
+					{#if searching || aiLoading}
+						<span class="spin-dot"></span>
+					{:else}
+						→
+					{/if}
 				</button>
 			</form>
 
@@ -821,21 +869,39 @@
 								<div class="drop-kicker">NYC Addresses</div>
 								{#each geoHits as hit, i}
 									{@const navId = `geo:${i}`}
+									{@const isJumping = jumpingNavId === navId}
 									<button
 										type="button"
 										role="option"
 										aria-selected={activeNavId === navId}
 										data-nav-id={navId}
 										class="drop-row"
-										class:active={activeNavId === navId}
-										onmouseenter={() => setActiveById(navId)}
-										onclick={() => selectGeoHit(hit)}
+										class:active={activeNavId === navId || isJumping}
+										class:jumping={isJumping}
+										disabled={searching}
+										onmouseenter={() => {
+											setActiveById(navId);
+											prefetchGeoHit(hit);
+										}}
+										onclick={() => selectGeoHit(hit, navId)}
 									>
 										<div class="dr-copy">
 											<strong>{hit.label}</strong>
-											<span>{hit.borough}{hit.bbl ? ' · Jump straight to building' : ' · Jump to block'}</span>
+											<span>
+												{#if isJumping}
+													Opening {hit.bbl ? 'building dossier' : 'block'}…
+												{:else}
+													{hit.borough}{hit.bbl ? ' · Jump straight to building' : ' · Jump to block'}
+												{/if}
+											</span>
 										</div>
-										<span class="dr-badge">{activeNavId === navId ? '↵' : hit.bbl ? 'Bldg' : 'Block'}</span>
+										<span class="dr-badge" class:accent={isJumping}>
+											{#if isJumping}
+												<span class="spin-dot inline"></span>
+											{:else}
+												{activeNavId === navId ? '↵' : hit.bbl ? 'Bldg' : 'Block'}
+											{/if}
+										</span>
 									</button>
 								{/each}
 							</div>
@@ -1218,7 +1284,18 @@
 		height: 8px;
 		border-radius: 99px;
 		background: #e62217;
+		display: inline-block;
 		animation: pulseDot 0.9s infinite ease-in-out;
+	}
+
+	.spin-dot.inline {
+		width: 7px;
+		height: 7px;
+		vertical-align: middle;
+	}
+
+	.drop-row.jumping {
+		background: var(--accent-soft);
 	}
 
 	@keyframes pulseDot {
